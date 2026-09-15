@@ -262,19 +262,47 @@ a slow $T_e$ creep would shift $\omega_p$ and masquerade as physics.
 \section{Building on Lonestar6}
 \label{sec:builds}
 
-Four configurations are used. All require \code{module load gcc/13.2.0}: the binaries
-link against GCC~13's \code{libstdc++}, and the default LS6 environment provides
-gcc/9.4.0, under which the executable dies at load time with
-\code{GLIBCXX\_3.4.31 not found} \emph{before} reading its input file.
+This section is the full recipe: the four build directories used in this work can be
+reconstructed from scratch by following it in order. The directories themselves are
+not version-controlled --- they total ${\sim}1.2$\,GB of object files, fetched
+dependency sources and architecture-specific binaries, and are valid only on this
+machine.
+
+\subsection{Environment and prerequisites}
+
+All four builds are configured and compiled \textbf{on a login node}. \textsc{Entity}
+fetches Kokkos and ADIOS2 with CMake's \code{FetchContent} at configure time, and LS6
+compute nodes have no outbound network: the same commands on a compute node fail in
+the clone step.
 
 \begin{lstlisting}
-IGN=-DCMAKE_IGNORE_PATH=<repo>/cmake
+module load gcc/13.2.0    # switches the hierarchy; brings impi/21.12 with it
+module load cuda/12.8     # CUDA builds only -- LS6 defaults to cuda/11.4
+\end{lstlisting}
+
+\code{gcc/13.2.0} is not optional. The binaries link against GCC~13's
+\code{libstdc++}; the default LS6 environment provides gcc/9.4.0, under which the
+executable dies at load time with \code{GLIBCXX\_3.4.31 not found} \emph{before} it
+reads its input file. The module must therefore also be loaded in every job script,
+not only at build time. Loading it switches the module hierarchy to
+\code{/opt/apps/gcc13\_2/modulefiles} and pulls in \code{impi/21.12} (Intel oneAPI MPI
+2021.12, \code{mpigxx}), which is the MPI the two parallel builds pick up. CUDA must be
+requested explicitly: the site default \code{cuda/11.4} is too old for the fetched
+Kokkos, and the builds here used \code{cuda/12.8} (\code{nvcc} at
+\code{/opt/apps/cuda/12.8/bin/nvcc}).
+
+\subsection{Configure}
+
+Four configurations are used, differing only in backend. All are configured from the
+repository root:
+
+\begin{lstlisting}
+IGN=-DCMAKE_IGNORE_PATH=$PWD/cmake
 COMMON="-D pgen=dpdm -D deposit=esirkepov -D shape_order=5 -D precision=double"
 KOK="-D Kokkos_ENABLE_OPENMP=ON -D Kokkos_ENABLE_SERIAL=OFF"
 
-# 1. CPU serial (OpenMP)   -- validation, fast resonance case
-cmake -B build-dpdm          $COMMON $KOK -D Kokkos_ARCH_ZEN3=ON \
-      -D adios2_DIR=$PWD/build/_deps/adios2-build
+# 1. CPU, OpenMP           -- validation, fast resonance case
+cmake -B build-dpdm          $COMMON $KOK -D Kokkos_ARCH_ZEN3=ON $IGN
 # 2. CPU + MPI             -- multi-node fallback
 cmake -B build-dpdm-mpi      $COMMON $KOK -D Kokkos_ARCH_ZEN3=ON -D mpi=ON $IGN
 # 3. CUDA, single GPU      -- the production path
@@ -283,6 +311,41 @@ cmake -B build-dpdm-cuda     $COMMON -D Kokkos_ENABLE_CUDA=ON \
 # 4. CUDA + MPI, multi-GPU -- LZ 0.1, long-term stability
 cmake -B build-dpdm-cuda-mpi $COMMON $KOK -D mpi=ON -D gpu_aware_mpi=OFF \
       -D Kokkos_ENABLE_CUDA=ON -D Kokkos_ARCH_AMPERE80=ON $IGN
+\end{lstlisting}
+
+\code{Kokkos\_ARCH\_ZEN3} targets the AMD EPYC 7763 CPU nodes and
+\code{Kokkos\_ARCH\_AMPERE80} the A100s; configuration~3 omits \code{\$KOK} because a
+CUDA backend does not need a threaded host backend for this workload. Each \code{cmake
+-B} re-fetches and re-builds its own private copy of Kokkos and ADIOS2 under
+\code{<build>/\_deps}, which is why four directories cost ${\sim}1.2$\,GB rather than
+four small binaries.
+
+\paragraph{Historical note.} Configuration~1 was in fact first configured with
+\code{-D adios2\_DIR=\$PWD/build/\_deps/adios2-build}, reusing the ADIOS2 that an
+earlier unrelated \code{build/} directory had already fetched. That works, but it is
+not reproducible from a clean checkout --- there is no \code{build/} to point at --- so
+the form given above, using \code{\$IGN} like the other three, is the one to follow.
+The two are equivalent: both end up at ADIOS2 2.11.0.
+
+\subsection{Compile}
+
+\begin{lstlisting}
+cmake --build build-dpdm          -j 8
+cmake --build build-dpdm-mpi      -j 8
+cmake --build build-dpdm-cuda     -j 8
+cmake --build build-dpdm-cuda-mpi -j 8
+\end{lstlisting}
+
+Each produces its executable at \code{<build>/src/entity.xc}; that path is what the job
+scripts in \code{pgens/dpdm/} invoke. The CUDA configurations take substantially longer
+than the CPU ones --- every kernel is compiled twice, to PTX and to Ampere SASS.
+Keep \code{-j} modest: LS6 login nodes are shared, and a large \code{-j} on an
+\code{nvcc} build is the usual way to get a job killed by the login-node watchdog.
+
+\paragraph{Verify before trusting a build.} Configure-time options fail silently here
+(Trap~2 below), so check the cache rather than assuming:
+\begin{lstlisting}
+grep -E "^Kokkos_ENABLE_(OPENMP|SERIAL|CUDA):BOOL" build-*/CMakeCache.txt
 \end{lstlisting}
 
 \paragraph{Trap 1: the ADIOS2 shim shadows its own package.}
@@ -301,10 +364,8 @@ Kokkos defaults to \textbf{Serial only}. A Serial build is externally
 indistinguishable from a threaded one and runs ${\sim}112\times$ slower
 (\code{NLWP = 2}, 99.5\% CPU). This cost a 40-minute walltime overrun and two
 incorrect diagnoses (SLURM \code{-c}, then \code{ibrun} binding --- both innocent).
-Always verify:
-\begin{lstlisting}
-grep -E "^Kokkos_ENABLE_(OPENMP|SERIAL|CUDA):BOOL" build-*/CMakeCache.txt
-\end{lstlisting}
+This is why the cache check at the end of the previous subsection is mandatory and not
+advisory.
 
 \paragraph{Trap 3: ADIOS2 target rename.} ADIOS2~2.11 renamed the C++ bindings target
 from \code{cxx11} to \code{cxx} (and \code{cxx11\_mpi} to \code{cxx\_mpi}).
