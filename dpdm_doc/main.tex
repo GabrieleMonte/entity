@@ -1098,7 +1098,7 @@ $\omega_p/H \approx 7\times10^4$.
 Run & $v_q^D/\vth$ & $\Npc$ & Resources & Status \\
 \midrule
 Heating gate (undriven) & --- & $2.7\times10^3$ & 1 A100, 2\,h & complete: $T_e$ drift $-0.016\%$ \\
-LZ high amplitude & 1.0 & $2.7\times10^3$ & 1 A100, ${\sim}2$\,h & running \\
+LZ high amplitude & 1.0 & $2.7\times10^3$ & 1 A100, 2:39:32 & complete, $\wpt = 2\times10^4$ \\
 LZ low amplitude  & 0.1 & $2.7\times10^5$ & 3 A100, ${\sim}81$\,h chained & written, gated \\
 \bottomrule
 \end{tabular}
@@ -1164,8 +1164,13 @@ one that exceeded 40~minutes.
 and its validation (including MPI decomposition independence), the numerical-heating
 gate at Landau--Zener duration, and the full performance characterisation.
 
-\paragraph{In progress.} Landau--Zener at $v_q^D/\vth = 1.0$; the $0.1$ case is written
-and gated on it.
+\paragraph{In progress.} Landau--Zener at $v_q^D/\vth = 1.0$ has completed the full
+sweep to $\wpt = 2\times10^4$ (2:39:32 on one A100, 500 field and 500 particle dumps);
+its analysis is pending. The $0.1$ case is written and gated on that analysis.
+
+Note that the $1.0$ case took 2:39:32 against an estimate of ${\sim}2$\,h --- it would
+not have fitted a 2\,h queue. The estimate predated the post-saturation slowdown of
+\S\ref{sec:slowdown}, which applies to the swept family too.
 
 \paragraph{Open.}
 \begin{itemize}[nosep]

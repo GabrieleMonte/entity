@@ -20,8 +20,11 @@ different N_pc, different physics.
 WHERE TO RUN THIS
     On Lonestar6, not on your laptop: it turns ~1.9 GB of .bp into ~50 MB of
     .npz, so reducing first means downloading 50 MB instead of 1.9 GB.  nt2py is
-    already installed there (1.5.3).  Do NOT run it on a login node -- opening a
-    1000-dump field series is minutes of work and login nodes are shared:
+    already installed there (1.5.3).  Do NOT run it on a login node: opening the
+    dump series is the memory-hungry step, not reading it.  Each .bp reserves a
+    16 MB ADIOS2 buffer at open, and `fast` has 1000 field dumps against run34's
+    300 -- an nt2.Data() call on `fast` from a login node dies with "FFS out of
+    memory" before returning.  A development node has the memory for it:
 
         sbatch -p development -N 1 -n 1 -t 01:00:00 -A PHY23028 \
                --wrap "module load gcc/13.2.0; python3 extract_paper.py"
@@ -87,8 +90,13 @@ except ImportError:
     pass
 
 # ----------------------------------------------------------------------------
-paper_dir = "PATH/TO/paper_runs"     # <-- the staged tree described above
-out_dir   = "paper_npy"
+# Both can be overridden from the environment, which is how extract_paper.sh
+# drives this on the cluster without editing the file.
+paper_dir = os.environ.get("PAPER_DIR", "PATH/TO/paper_runs")
+out_dir   = os.environ.get("OUT_DIR",   "paper_npy")
+# FORCE=1 re-extracts runs whose .npz already exist. Without it they are skipped,
+# so a job that hit its walltime can be resubmitted and will only do what is left.
+force     = os.environ.get("FORCE", "") == "1"
 # ----------------------------------------------------------------------------
 
 # Reading every dump in one .values call makes dask open all the .bp files at
@@ -115,13 +123,16 @@ RANDOM_FLOOR_T0   = 3.03e-6      # undriven_r at t = 0
 HEAT_PLATEAU      = 4.8e-8       # heat, reached by omega_p t ~ 5000
 HEAT_RANDOM_FLOOR = 7.6e-8       # random start at the same N_pc
 
+# Ordered cheapest first. The particle loop dominates and costs ~1 s per dump per
+# species, so `fast` (1000 dumps) is most of the total: if a job runs out of time
+# it will have finished the other five, and resubmitting picks up only `fast`.
 RUNS = {
-    "fast":       dict(family="resonance",    ratio=3e-2, loading="quiet"),
-    "slow":       dict(family="resonance",    ratio=1e-3, loading="quiet"),
-    "lz1p0":      dict(family="landau_zener", ratio=1.0,  loading="quiet"),
     "heat":       dict(family="undriven",     ratio=0.0,  loading="quiet"),
     "undriven_q": dict(family="undriven",     ratio=0.0,  loading="quiet"),
     "undriven_r": dict(family="undriven",     ratio=0.0,  loading="random"),
+    "slow":       dict(family="resonance",    ratio=1e-3, loading="quiet"),
+    "lz1p0":      dict(family="landau_zener", ratio=1.0,  loading="quiet"),
+    "fast":       dict(family="resonance",    ratio=3e-2, loading="quiet"),
 }
 
 GROUPS = {
@@ -353,26 +364,36 @@ def main():
         if not os.path.isdir(rundir(tag)):
             print(f"[{tag}] not present, skipping")
             continue
-        print(f"[{tag}]", end=" ", flush=True)
+        meta_only = (os.path.exists(os.path.join(out_dir, f"{tag}_fields.npz"))
+                     and not force)
+        if meta_only:
+            # summary.npz still needs the stats, but they are cheap to re-read.
+            st = read_stats(tag)
+            print(f"[{tag}] already extracted, skipping (FORCE=1 to redo)",
+                  flush=True)
+        else:
+            print(f"[{tag}]", end=" ", flush=True)
 
-        st = read_stats(tag)
-        np.savez_compressed(os.path.join(out_dir, f"{tag}_stats.npz"), **st)
-        print(f"stats({st['t'].size})", end=" ", flush=True)
+        if not meta_only:
+            st = read_stats(tag)
+            np.savez_compressed(os.path.join(out_dir, f"{tag}_stats.npz"), **st)
+            print(f"stats({st['t'].size})", end=" ", flush=True)
 
-        data = nt2.Data(rundir(tag))
+        data = None if meta_only else nt2.Data(rundir(tag))
 
-        fl = read_fields(data)
-        np.savez_compressed(os.path.join(out_dir, f"{tag}_fields.npz"), **fl)
-        print(f"fields({fl['t'].size})", end=" ", flush=True)
+        if not meta_only:
+            fl = read_fields(data)
+            np.savez_compressed(os.path.join(out_dir, f"{tag}_fields.npz"), **fl)
+            print(f"fields({fl['t'].size})", end=" ", flush=True)
 
-        # heat wrote no particle dumps -- it is a stats-only run by design.
-        try:
-            mo, ph = read_particles(data, x_max=float(fl["x"][-1]))
-            np.savez_compressed(os.path.join(out_dir, f"{tag}_temps.npz"), **mo)
-            np.savez_compressed(os.path.join(out_dir, f"{tag}_phase.npz"), **ph)
-            print(f"temps({mo['t'].size}) phase({ph['t'].size})", flush=True)
-        except Exception as exc:
-            print(f"no particles ({type(exc).__name__})", flush=True)
+            # heat wrote no particle dumps -- it is a stats-only run by design.
+            try:
+                mo, ph = read_particles(data, x_max=float(fl["x"][-1]))
+                np.savez_compressed(os.path.join(out_dir, f"{tag}_temps.npz"), **mo)
+                np.savez_compressed(os.path.join(out_dir, f"{tag}_phase.npz"), **ph)
+                print(f"temps({mo['t'].size}) phase({ph['t'].size})", flush=True)
+            except Exception as exc:
+                print(f"no particles ({type(exc).__name__})", flush=True)
 
         A0   = deck_value(tag, "A0", 0.0)
         npc  = deck_value(tag, "ppc0")
