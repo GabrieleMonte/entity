@@ -12,7 +12,7 @@
 [simulation]
   name    = "dpdm_res"
   engine  = "srpic"
-  runtime = 3000.0                     # omega_p t
+  runtime = 10000.0                    # omega_p t (paper Fig. 2 duration)
 
 [grid]
   resolution = [1000]
@@ -38,20 +38,22 @@
     CFL = 0.5                          # dt = 0.02 / omega_p
 
 [particles]
-  ppc0 = 2000.0                        # per species; eps_noise = 2.06e-4/ppc0
+  # N_pc per cell per species; Np = N_pc*Nx. Paper Fig. 2 uses 2e2 for the fast
+  # case (A0 = 9.48683e-4) and 2e5 for the slow case (A0 = 3.16228e-5).
+  ppc0 = 200.0                         # eps_noise = 2.06e-4/ppc0
 
   [[particles.species]]
     label    = "e-"
     mass     = 1.0
     charge   = -1.0
-    maxnpart = 2.5e6                   # > ppc0 * density * 0.5 * ncells
+    maxnpart = 2.5e5                   # must exceed ppc0*densities[0]/2*Nx = 2.0e5
     pusher   = "Vay"
 
   [[particles.species]]
     label    = "i+"
     mass     = 1836.0
     charge   = 1.0
-    maxnpart = 2.5e6
+    maxnpart = 2.5e5
     pusher   = "Vay"
 
 [setup]
@@ -60,18 +62,28 @@
   # in units of m0 c^2; injector divides by species mass, so both are 1e-3 m_e c^2
   temperatures = [1.0e-3, 1.0e-3]
   drive        = "resonance"
-  A0           = 9.4868e-4
+  loading      = "quiet"             # NOT the default: pgen.hpp defaults to "random"
+  one_v        = true                # ux2 = ux3 = 0, matching SHARP's 1V Maxwellian
+  A0           = 9.48683e-4          # v_q^D/vth^e = 3e-2 (fast case)
   omega        = 1.0
 
+[diagnostics]
+  # Without this block <name>.log is a ~4 kB/step kernel trace and <name>.out is a
+  # progress bar redrawn every step, both written synchronously to the parallel
+  # filesystem: 107 MB of text beside 75 kB of science on a 2e4-step run.
+  interval        = 1000
+  log_level       = "WARNING"
+  colored_stdout  = false
+
 [output]
-  interval_time = 25.0
+  interval_time = 10.0
 
   [output.fields]
     quantities = ["E", "N_1", "N_2", "Rho", "J", "T00_1", "T00_2"]
 
   [output.particles]
     species = [1, 2]
-    stride  = 200
+    stride  = 20
 
   [output.stats]
     enable = true
@@ -85,5 +97,5 @@
     enable = false
 
 [checkpoint]
-  interval_time = 500.0
+  interval_time = 2500.0
   keep          = 2

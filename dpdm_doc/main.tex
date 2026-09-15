@@ -43,15 +43,21 @@ dark matter from resonant conversion''} (arXiv:2510.13956) with \textsc{Entity}\
 \noindent
 This note documents a reproduction of the particle-in-cell (PIC) results of Hook,
 Huang \& Shalaby (arXiv:2510.13956v1) using the \textsc{Entity} PIC framework in
-place of the authors' \textsc{SHARP} code. Part~\ref{part:impl} covers the
-implementation: a dedicated problem generator, a deterministic (``quiet'') particle
-loader written for this work, the four build configurations required on TACC
-Lonestar6, and a measured performance characterisation across CPU, single-GPU and
-multi-GPU execution. Part~\ref{part:runs} documents every production run, the exact
-settings used, and a point-by-point comparison with the parameters and results stated
-in the paper. Both resonance cases of the paper's Fig.~2 are reproduced; the
-Landau--Zener family is in progress. All performance and physics numbers quoted are
-measured on Lonestar6 unless explicitly labelled as an estimate.
+place of the authors' \textsc{SHARP} code.
+
+Part~\ref{part:guide} is an operating manual: the repository layout, a quickstart, a
+reference for the input deck, job scripts and queue selection, the output format and
+analysis pipeline, a procedure for sizing a new run, and a consolidated list of the
+rules and traps that govern all of it. It is reference-ordered and is the only part
+needed in order to run something.
+Part~\ref{part:impl} covers the implementation: a dedicated problem generator, a
+deterministic (``quiet'') particle loader written for this work, the four build
+configurations required on TACC Lonestar6, and a measured performance characterisation
+across CPU, single-GPU and multi-GPU execution. Part~\ref{part:runs} documents every
+production run, the exact settings used, and a point-by-point comparison with the
+parameters and results stated in the paper. Both resonance cases of the paper's Fig.~2
+are reproduced; the Landau--Zener family is in progress. All performance and physics
+numbers quoted are measured on Lonestar6 unless explicitly labelled as an estimate.
 \end{abstract}
 
 \tableofcontents
@@ -84,16 +90,520 @@ $m_e = 1$. Energies are in $n_e m_e c^2$, times in $\omega_p^{-1}$, wavenumbers 
 $\omega_p/c$. The drive amplitude in code units equals the paper's:
 $A_0 = v_q^D/c = (v_q^D/\vth)\sqrt{10^{-3}}$.
 
-\paragraph{A note on what is measured.} This document distinguishes carefully between
-measured and estimated quantities, because several early estimates in this project
-turned out to be wrong by large factors and were corrected only after production runs
-exposed them. Section~\ref{sec:corrections} lists those corrections explicitly.
+\paragraph{Measured versus estimated.} Every performance and physics number here is
+measured on Lonestar6 unless explicitly labelled an estimate.
+Section~\ref{sec:corrections} lists the few figures from earlier drafts that are
+superseded, so that they are recognisable if they turn up in older scripts or notes.
+
+\clearpage
+\part{Working guide}
+\label{part:guide}
+
+\noindent\emph{This part is reference-ordered and self-contained: it is what to read in
+order to run something. Part~\ref{part:impl} explains why the code is built the way it
+is, and Part~\ref{part:runs} records what the production runs produced. Neither is
+needed to operate the code.}
+
+\section{Repository map}
+\label{sec:repomap}
+
+Everything specific to this work lives in two directories of the \textsc{Entity} tree.
+
+\begin{center}\small
+\begin{tabular}{@{}lp{9.6cm}@{}}
+\toprule
+Path (under repository root) & Contents \\
+\midrule
+\multicolumn{2}{@{}l}{\textit{\code{pgens/dpdm/} --- problem generator, decks, job scripts}}\\
+\code{pgen.hpp}            & The problem generator: external drive, quiet loader, custom
+                             diagnostic. The only C++ in this work (\S\ref{sec:pgen}). \\
+\code{resonance.toml}      & Reference deck, fixed-frequency family. Start here. \\
+\code{landau\_zener.toml}  & Reference deck, swept-frequency family. \\
+\code{run\_paper\_fast.sh} & Production: $v_q^D/\vth = 3\times10^{-2}$, $\Npc=2\times10^2$, 1 CPU node. \\
+\code{run\_paper\_slow.sh} & Production: $v_q^D/\vth = 1\times10^{-3}$, $\Npc=2\times10^5$, 1 A100. \\
+\code{run\_paper\_slow\_resume.sh} & The same run restarted from checkpoint (\S\ref{sec:restart}). \\
+\code{run\_lz1p0.sh}, \code{run\_lz0p1.sh} & Landau--Zener production at $v_q^D/\vth = 1.0$ and $0.1$. \\
+\code{run\_lz\_heating.sh} & Undriven numerical-heating gate at Landau--Zener duration. \\
+\code{validate\_quiet.sh}, \code{check\_quiet.py} & Quiet-start validation gates (\S\ref{sec:quietval}). \\
+\code{validate\_mpi.sh}    & Confirms results are independent of MPI domain count. \\
+\code{bench\_slow.sh}, \code{bench\_gpu.sh}, \code{bench\_multigpu.sh} & Throughput benchmarks: CPU/MPI, 1 GPU, 3 GPU. \\
+\code{diag\_slow.sh}, \code{diag\_growth.sh}, \code{affinity\_test.sh} & Diagnostics for
+                             performance and thread-placement questions. \\
+\midrule
+\multicolumn{2}{@{}l}{\textit{\code{pgens/dpdm/run34/} --- the resonance-ladder survey and its analysis pipeline}}\\
+\code{run34.sh}            & Eight-run ladder in $v_q^D/\vth$ plus two convergence runs. \\
+\code{extract\_run34.py}   & Reduces ADIOS2 output to \code{.npz} (\S\ref{sec:analysis}). \\
+\code{PLOTS.md}            & Which four plots to make and what each one claims. \\
+\code{run34\_plots.ipynb}  & The plots, from the \code{.npz} files. \\
+\midrule
+\multicolumn{2}{@{}l}{\textit{\code{dpdm\_doc/} --- this document}}\\
+\code{main.tex}, \code{Makefile} & Source and build (\code{make} $\to$ \code{main.pdf}). \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Build directories (\code{build-dpdm*/}) are deliberately not version
+controlled; see \S\ref{sec:builds}. Run output goes to \code{\$SCRATCH}, which is
+\textbf{purged on a rolling basis} --- copy anything you intend to keep to
+\code{\$WORK}.
+
+\section{Quickstart}
+\label{sec:quickstart}
+
+End to end, on a login node unless stated otherwise:
+
+\begin{enumerate}
+  \item \textbf{Build once.} Follow \S\ref{sec:builds}. For a first run the CPU
+        OpenMP configuration (\code{build-dpdm}) is enough; the CUDA build
+        (\code{build-dpdm-cuda}) is what production uses.
+  \item \textbf{Verify the build} --- configure options fail silently here:
+        \begin{lstlisting}
+grep -E "^Kokkos_ENABLE_(OPENMP|SERIAL|CUDA):BOOL" build-*/CMakeCache.txt
+        \end{lstlisting}
+  \item \textbf{Copy a job script} from \code{pgens/dpdm/} that matches the shape of
+        what you want --- they are self-contained and embed their own deck --- and edit
+        the deck inside it (\S\ref{sec:deck}).
+  \item \textbf{Size the run}: particle count, GPU count and walltime follow a fixed
+        procedure (\S\ref{sec:sizing}). The GPU count in particular cannot be changed
+        after the first submission if the run will ever restart.
+  \item \textbf{Submit}: \code{sbatch run\_my\_case.sh}. Jobs under 2\,h belong in
+        \code{development} (\S\ref{sec:queues}).
+  \item \textbf{Analyse}: the stats CSV answers most questions directly; field and
+        particle dumps go through \code{extract\_run34.py}
+        (\S\ref{sec:analysis}).
+\end{enumerate}
+
+\section{The input deck}
+\label{sec:deck}
+
+\subsection{The \code{[setup]} block --- the DPDM interface}
+
+These nine keys are the whole problem-specific interface; everything else in the deck
+is stock \textsc{Entity}. Defaults are those in \code{pgen.hpp}.
+
+\begin{center}\small
+\begin{tabular}{@{}llp{7.4cm}@{}}
+\toprule
+Key & Default & Meaning \\
+\midrule
+\code{drive}        & \code{"resonance"} & \code{"resonance"} (fixed $\omega$) or
+                                           \code{"landau\_zener"} (swept). \\
+\code{loading}      & \code{"random"}    & \code{"quiet"} selects the deterministic
+                                           lattice. \textbf{Set this explicitly}
+                                           --- the default is the stock random
+                                           injector (\S\ref{sec:quiet}). \\
+\code{one\_v}       & \code{true}        & Sets $u_{x2}=u_{x3}=0$, matching
+                                           \textsc{SHARP} and the paper's 1V thermal
+                                           speed. Leave on for paper comparison. \\
+\code{A0}           & \code{0.0}         & Drive amplitude in code units,
+                                           $A_0 = v_q^D/c = (v_q^D/\vth)\sqrt{10^{-3}}$. \\
+\code{omega}        & \code{1.0}         & Drive frequency, \code{drive="resonance"} only. \\
+\code{omega0}       & \code{0.0}         & Initial frequency, \code{drive="landau\_zener"} only. \\
+\code{domega\_dt}   & \code{0.0}         & Sweep rate, \code{drive="landau\_zener"} only. \\
+\code{densities}    & \code{[2.0]}       & One entry, per species \emph{pair}.
+                                           \code{[2.0]} with \code{skindepth0 = 1}
+                                           gives $n_e = n_0$, hence $\omega_{pe}=1$. \\
+\code{temperatures} & ---                & One entry per species, in $m_0c^2$. The
+                                           injector divides by species mass, so
+                                           \code{[1.0e-3, 1.0e-3]} is
+                                           $10^{-3}m_ec^2$ for both. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The two drive families are mutually exclusive in their parameters:
+\code{omega} is ignored when sweeping, and \code{omega0}/\code{domega\_dt} are ignored
+when not. An unrecognised \code{drive} or \code{loading} aborts at startup with a
+readable message rather than running the wrong physics.
+
+\subsection{Settings outside \code{[setup]} that are not optional}
+\label{sec:deckmust}
+
+\begin{itemize}[nosep]
+  \item \code{particles.ppc0} must be written as a \textbf{float}.
+        \code{ppc0 = 2000} aborts with
+        \code{toml::value::as\_floating(): bad\_cast}; write \code{2000.0}.
+  \item \code{maxnpart} per species must exceed
+        $\code{ppc0}\times\code{densities[0]}/2\times N_x$, with headroom.
+  \item A \code{[diagnostics]} block is required in practice.
+        Without it, \code{<name>.log} is a kernel trace at ${\sim}4$\,kB
+        \emph{per step} and \code{<name>.out} is a progress bar redrawn every step,
+        both written synchronously to the parallel filesystem. Use
+        \code{log\_level = "WARNING"}, \code{interval = 1000},
+        \code{colored\_stdout = false}.
+  \item \code{[output.spectra]} defaults to \emph{on}; set \code{enable = false}.
+  \item \code{[output.stats] interval\_time} must be $\ge 0.5$, and preferably
+        $\ge 1.0$. Per-species \code{T00\_1}/\code{T00\_2} force a moment reduction
+        over every particle; at $0.1$ this doubles wall-clock.
+  \item Stats quantity names are literal: \code{"E\^{}2"}, \code{"T00\_1"},
+        \code{"T00\_2"}, \code{"J.E"}. \code{"JdotE"} aborts. \code{"T00"} alone gives
+        the species sum.
+  \item \code{algorithms.current\_filters = 0}. The saturation physics lives at high
+        $k$; filtering removes exactly the modes of interest.
+\end{itemize}
+
+\subsection{A complete deck}
+
+The fast resonance case in full. Every other run in this work is this file with
+\code{ppc0}, \code{A0}, \code{runtime} and the \code{[setup]} drive keys changed.
+
+\begin{lstlisting}
+[simulation]
+  name = "fast"
+  engine = "srpic"
+  runtime = 10000.0            # omega_p t
+[grid]
+  resolution = [1000]          # Nx
+  extent = [[0.0, 40.0]]       # L = 40 c/omega_p, so dx = 0.04 ~ lambda_D
+  [grid.metric]
+    metric = "minkowski"
+  [grid.boundaries]
+    fields = [["PERIODIC"]]
+    particles = [["PERIODIC"]]
+[scales]
+  skindepth0 = 1.0             # with densities=[2.0] this sets omega_pe = 1
+  larmor0 = 1.0                # unused: no magnetic field
+[algorithms]
+  current_filters = 0          # KEEP AT 0 -- see above
+  [algorithms.timestep]
+    CFL = 0.5                  # dt = 0.02 / omega_p
+[particles]
+  ppc0 = 200.0                 # N_pc per cell per species; Np = N_pc*Nx = 2e5
+  [[particles.species]]
+    label = "e-"
+    mass = 1.0
+    charge = -1.0
+    maxnpart = 2.5e5
+    pusher = "Vay"
+  [[particles.species]]
+    label = "i+"
+    mass = 1836.0              # real mass ratio; ions are evolved
+    charge = 1.0
+    maxnpart = 2.5e5
+    pusher = "Vay"
+[setup]
+  densities = [2.0]
+  temperatures = [1.0e-3, 1.0e-3]
+  drive = "resonance"
+  loading = "quiet"            # NOT the default -- must be stated
+  one_v = true
+  A0 = 9.48683e-4              # v_q^D/vth_e = 3e-2
+  omega = 1.0
+[diagnostics]
+  interval = 1000
+  log_level = "WARNING"
+  colored_stdout = false
+[output]
+  interval_time = 10.0         # field/particle dumps; 1000 of them here
+  [output.fields]
+    quantities = ["E", "N_1", "N_2", "Rho", "J", "T00_1", "T00_2"]
+  [output.particles]
+    species = [1, 2]
+    stride = 20
+  [output.stats]
+    enable = true
+    interval_time = 0.5
+    quantities = ["E^2", "T00_1", "T00_2", "J.E"]
+    custom = ["e_ext"]         # the drive itself, for phase checks
+  [output.spectra]
+    enable = false
+[checkpoint]
+  interval_time = 2500.0
+  keep = 2
+\end{lstlisting}
+
+\noindent For the swept family, replace the four drive keys:
+\begin{lstlisting}
+  drive = "landau_zener"
+  A0 = 3.16228e-3              # v_q^D/vth_e = 0.1
+  omega0 = 0.8                 # start below resonance
+  domega_dt = 2.0e-5           # 0.1 omega_p over omega_p t = 5000
+\end{lstlisting}
+
+\section{Job scripts and the run loop}
+\label{sec:jobs}
+
+\subsection{Template}
+
+Job scripts in \code{pgens/dpdm/} are self-contained: they carry their own deck as a
+heredoc, so a script plus its log is a complete record of what was run. The skeleton:
+
+\begin{lstlisting}
+#!/bin/bash
+#SBATCH -J dpdm_fast
+#SBATCH -o sbatch_logs/out/fast.o%j
+#SBATCH -e sbatch_logs/err/fast.e%j
+#SBATCH -p development          # see queue selection below
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -t 01:30:00
+#SBATCH -A PHY23028
+#SBATCH --mail-type=all
+#SBATCH --mail-user=<you>@utexas.edu
+
+module load gcc/13.2.0          # REQUIRED at run time, not only at build time
+
+export OMP_NUM_THREADS=112      # CPU builds only; omit for CUDA
+export OMP_PROC_BIND=close
+export OMP_PLACES=cores
+
+ROOT=$SCRATCH/dpdm/paper/fast
+EXE=<repo>/build-dpdm/src/entity.xc
+mkdir -p $ROOT/fast             # pre-create <simulation.name>/ -- see below
+
+cat > $ROOT/fast.toml <<EOF
+... deck ...
+EOF
+
+cd $ROOT && $EXE -input fast.toml > fast.stdout 2>&1
+echo "exit=$? $(date -Is)"
+\end{lstlisting}
+
+Three things in that skeleton are load-bearing:
+
+\begin{itemize}[nosep]
+  \item \code{module load gcc/13.2.0} inside the job. The binary links GCC~13's
+        \code{libstdc++}; the default environment is gcc/9.4.0 and the executable dies
+        with \code{GLIBCXX\_3.4.31 not found} \emph{before} reading its input.
+  \item \code{mkdir -p \$ROOT/<simulation.name>}. Under MPI every rank calls
+        \code{mkdir} on that directory and the losers abort with
+        \code{filesystem error: cannot create directory: File exists}, exit 255, within
+        seconds. A job that "finished" in four seconds is this, not speed.
+  \item \code{sbatch\_logs/out/} and \code{sbatch\_logs/err/} must exist before
+        submission or the job is rejected.
+\end{itemize}
+
+MPI runs replace the last line with \code{ibrun} and set \code{-n} to the rank count;
+single-GPU runs need no launcher and no \code{OMP\_*} variables.
+
+\subsection{Choosing a queue}
+\label{sec:queues}
+
+\begin{center}\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Partition & MinNode & MaxNode & MaxWall & MaxNodePU & MaxJobsPU \\
+\midrule
+\code{development}    & 1 & 8   & 02:00:00   & 8  & 1  \\
+\code{normal}         & 1 & 64  & 2-00:00:00 & 64 & 20 \\
+\code{gpu-a100}       & 1 & 8   & 2-00:00:00 & 12 & 8  \\
+\code{gpu-a100-dev}   & 1 & 2   & 02:00:00   & 2  & 1  \\
+\code{gpu-a100-small} & 1 & 1   & 2-00:00:00 & 3  & 3  \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}[nosep]
+  \item \textbf{Under 2\,h and $\le 8$ nodes: use \code{development}.} Measured
+        turnaround there was 9\,s and 70\,s for jobs that never started at all in
+        \code{normal}. \code{MaxJobsPU = 1} only means short jobs run back-to-back,
+        which still beats \code{normal} priority.
+  \item \textbf{Single-GPU production: \code{gpu-a100-small}.} One A100 per node,
+        billing weight 32, versus three per node at weight 128 on \code{gpu-a100}.
+  \item \textbf{Prefer fewer nodes than the scaling curve suggests.} On a busy machine
+        queue wait swamps compute: multi-node GPU jobs requesting 2 and 4 nodes sat
+        unscheduled for 30\,h and were cancelled, while single-node jobs started within
+        minutes. A 12-GPU configuration with a 6\,h runtime is worthless if it waits
+        30\,h for contiguous nodes.
+\end{itemize}
+
+\subsection{Checkpoints and restarting}
+\label{sec:restart}
+
+Checkpoints are controlled by \code{[checkpoint] interval\_time} with \code{keep}
+retained, and written to \code{<name>.ckpt/} as
+\code{step-NNNNNNNN.bp} plus a \code{meta-NNNNNNNN.toml}. A run resumes with
+
+\begin{lstlisting}
+cd $ROOT && $EXE -input fast.toml -resume > fast.resume.stdout 2>&1
+\end{lstlisting}
+
+\noindent (aliases: \code{-continue}, \code{-restart}, \code{-checkpoint}).
+\textsc{Entity} selects the latest checkpoint automatically. Increase \code{runtime}
+in the deck if the original value has already been reached.
+
+\textbf{The domain count is locked by the checkpoint format.} An $N$-domain checkpoint
+can only be resumed by $N$ domains: a single-GPU checkpoint cannot be resumed by a
+3-GPU binary. Decide the rank/GPU count before the \emph{first} submission of any run
+that might need to restart --- there is no way to change it later without starting
+over.
+
+\section{Output and analysis}
+\label{sec:analysis}
+
+\subsection{What a run writes}
+
+Output lands in \code{<rundir>/<simulation.name>/}:
+
+\begin{center}\small
+\begin{tabular}{@{}lp{9.4cm}@{}}
+\toprule
+File & Contents \\
+\midrule
+\code{<name>\_stats.csv} & Scalar time series, one row per
+   \code{[output.stats] interval\_time}. Answers most questions on its own. \\
+\code{fields/*.bp}       & ADIOS2 BP5 field dumps at \code{[output] interval\_time}. \\
+\code{particles/*.bp}    & Particle dumps, decimated by \code{[output.particles] stride}. \\
+\code{<name>.log}, \code{<name>.out}, \code{<name>.info}, \code{<name>.err} & Logs; see
+   \S\ref{sec:deckmust} before the first production run. \\
+\code{<name>.ckpt/}      & Checkpoints (sibling of \code{<name>/}, not inside it). \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The stats CSV columns, in order, are
+\code{step}, \code{time}, \code{E1\^{}2}, \code{E2\^{}2}, \code{E3\^{}2},
+\code{T00\_1}, \code{T00\_2}, \code{J.E}, and any \code{custom} entries
+(here \code{e\_ext}). In 1D electrostatic runs \code{E2\^{}2} and \code{E3\^{}2} are
+zero by construction.
+
+\subsection{Deriving the physical quantities}
+
+The conversions below are the ones the plots need, and two of them are easy to get
+wrong in a way that changes conclusions by a factor of two or three.
+
+\begin{itemize}[nosep]
+  \item $\epsilon_E = \tfrac12\langle E_x^2\rangle$ from \code{E1\^{}2}.
+  \item $\Delta KE_e = T00\_1(t) - T00\_1(0)$, and likewise for the ions. Taking the
+        difference is what makes this safe under \textsc{Entity}'s 3V convention: with
+        no transverse forces the perpendicular energy is constant and cancels.
+  \item \textbf{The linear-theory line is
+        $\epsilon_E + \Delta KE_e = C A_0^2 (\wpt)^2$ with $C = 1/8$, compared against
+        the \emph{sum}, never $\epsilon_E$ alone.} A resonantly driven Langmuir wave
+        equipartitions, so the field holds half the wave energy on cycle average and
+        swings between 3\% and 85\% of it instantaneously at $2\omega_p$.
+  \item \textbf{The electron thermal reference is the 1V value
+        $\epsilon_{\rm th} = \tfrac12 n_e \vthsq = 5\times10^{-4}$}, not
+        $T00\_1 - 1 = 1.5\times10^{-3}$, which is the 3V rest-frame value.
+  \item \code{Rho} in the field output is \emph{mass} density ($1 + 1836 = 1837$ in
+        code units); the charge density is the separate \code{Charge} field.
+  \item \code{CustomStat} receives \code{time} one step behind the \code{time} column
+        of the same row (\code{engine.hpp} passes \code{time - dt} to the writer). This
+        affects \code{e\_ext} bookkeeping only; the pusher's centring is correct.
+\end{itemize}
+
+\subsection{Reading the field dumps}
+
+Field and particle output is ADIOS2 BP5 and is read with \code{nt2py}:
+
+\begin{lstlisting}
+pip install nt2py               # brings adios2 + xarray + dask
+\end{lstlisting}
+\begin{lstlisting}
+import nt2
+data = nt2.Data("<rundir>/<name>/<name>")     # note: name repeated
+\end{lstlisting}
+
+\code{pgens/dpdm/run34/extract\_run34.py} is the worked pipeline: it reduces a full
+survey (${\sim}2.7$\,GB of \code{.bp}) to ${\sim}65$\,MB of \code{.npz}
+--- \code{<tag>\_stats.npz}, \code{<tag>\_fields.npz}, \code{<tag>\_temps.npz},
+plus \code{summary.npz} and \code{meta.json} --- so that plotting needs only
+\code{numpy}. Set \code{run34\_dir} at the top of the file and run it once. This is the
+intended route for analysing on a laptop: reduce on the cluster, download the
+\code{.npz}.
+
+\code{run34/PLOTS.md} states which four plots matter and what each one claims: the
+energy budget (paper Fig.~2), the $E(k,t)$ and $n(k,t)$ spectra that show
+\emph{why} it saturates, the $N_p$ convergence gate, and the fast/slow regime
+transition. \code{run34\_plots.ipynb} produces them from the \code{.npz}.
+
+\section{Sizing a new run}
+\label{sec:sizing}
+
+Given a dark-photon amplitude $v_q^D/\vth$, in order:
+
+\begin{enumerate}
+  \item \textbf{Amplitude.} $A_0 = (v_q^D/\vth)\sqrt{10^{-3}}$.
+  \item \textbf{Particle count.} Use the paper's shot-noise floor
+        $\epsilon_{\rm noise} = L^2/(12 N_p N_x)$, in which \textbf{$N_p$ is the
+        \emph{total} macroparticle count}, $N_p = \Npc N_x$ --- not the per-cell
+        count. So evaluated, it agrees with measurement at a flat factor $3.1$ across
+        three decades of $\Npc$, and is the right tool for this job. In code units the
+        measured floor is $\epsilon_{\rm noise} = 2.06\times10^{-4}/\Npc$.
+        \begin{itemize}[nosep]
+          \item \emph{Resonant drive}: the signal grows as $t^2$, so it need only
+                outgrow the noise before saturation.
+          \item \emph{Swept drive}: the pre-resonance response is a \emph{bounded}
+                forced oscillation, $A_0/(1-\omega^2/\omega_p^2) = 2.78A_0$ at
+                $\omega = 0.8\omega_p$, so there is no time at which signal outgrows
+                noise. Use the paper's criterion
+                $\bar t_{\rm noise} = L/(A_0\sqrt{3N_pN_x/2}) \le 0.02$, giving
+                $\Npc = 2.7\times10^3$ at $v_q^D/\vth = 1.0$ and $2.7\times10^5$
+                at $0.1$.
+        \end{itemize}
+        \textbf{A quiet start does not reduce $\Npc$}; see \S\ref{sec:quietrelax}.
+  \item \textbf{Memory, hence GPU count.} At $\Npc = 2.7\times10^5$ a run holds
+        $5.3\times10^8$ particles and ${\approx}31$\,GB --- tight on one 40\,GB A100,
+        comfortable at ${\approx}10.5$\,GB per GPU across three. Because the checkpoint
+        domain count is locked (\S\ref{sec:restart}), settle this before submitting.
+  \item \textbf{Walltime.} Take the per-step cost from Table~\ref{tab:perf}, then
+        \textbf{double it}, or benchmark across the saturation transition. Per-step
+        cost roughly doubles once the plasma becomes turbulent
+        ($265 \to 516$\,ms on one A100 at $\Npc = 2\times10^5$); a benchmark run
+        entirely inside the laminar phase measures the wrong number. Steps
+        $= \text{runtime}/0.02$.
+  \item \textbf{Queue.} \S\ref{sec:queues}. If the estimate exceeds the 48\,h cap,
+        plan the restart chain from the start.
+\end{enumerate}
+
+\section{Rules and traps, consolidated}
+\label{sec:rules}
+
+Everything below is a standing rule. Each is stated once here; the evidence for it is
+in Parts~\ref{part:impl} and~\ref{part:runs}.
+
+\paragraph{Building.}
+\begin{enumerate}[nosep]
+  \item Configure and compile on a \textbf{login node}: \code{FetchContent} needs
+        outbound network and compute nodes have none.
+  \item \code{module load gcc/13.2.0} at build time \emph{and} in every job script.
+  \item Pass \code{-D Kokkos\_ENABLE\_OPENMP=ON -D Kokkos\_ENABLE\_SERIAL=OFF}
+        explicitly. \code{CMAKE\_IGNORE\_PATH}, which is required to make the ADIOS2
+        fetch work, also blocks the repository's Kokkos settings, and a freshly
+        fetched Kokkos defaults to Serial only --- a build that is externally
+        indistinguishable and ${\sim}112\times$ slower. Neither SLURM's \code{-c}
+        default nor \code{ibrun} binding causes this; do not go looking there.
+  \item Always verify the cache after configuring
+        (\S\ref{sec:quickstart}, step 2).
+\end{enumerate}
+
+\paragraph{Decks.}
+\begin{enumerate}[nosep,resume]
+  \item \code{ppc0} must be a TOML float.
+  \item \code{loading = "quiet"} must be stated; the default is \code{"random"}.
+  \item Include \code{[diagnostics]}, disable \code{[output.spectra]}, keep
+        \code{[output.stats] interval\_time} $\ge 1.0$, keep
+        \code{current\_filters = 0}.
+\end{enumerate}
+
+\paragraph{Running.}
+\begin{enumerate}[nosep,resume]
+  \item Pre-create \code{<rundir>/<simulation.name>/} before an MPI run.
+  \item Fix the rank/GPU count before the first submission: checkpoints lock it.
+  \item Budget a factor two on per-step cost across saturation.
+  \item Jobs under 2\,h go to \code{development}; prefer fewer nodes.
+  \item \code{blocking\_timers = true} is the first move on any performance surprise.
+        It prints a per-kernel breakdown in ns per particle-step and settles in
+        seconds questions that speculation gets wrong.
+\end{enumerate}
+
+\paragraph{Analysis.}
+\begin{enumerate}[nosep,resume]
+  \item Compare linear theory against $\epsilon_E + \Delta KE_e$, not $\epsilon_E$.
+  \item Use the 1V thermal reference $5\times10^{-4}$.
+  \item $N_p$ in the shot-noise formula is the total macroparticle count.
+  \item \code{Rho} is mass density; charge density is \code{Charge}.
+  \item $E_x(t{=}0) = 0$ proves nothing about the loading --- \textsc{Entity}
+        initialises $E$ to zero identically and both loaders co-locate the species.
+        The discriminator is the total density $n_e + n_i$.
+\end{enumerate}
 
 \clearpage
 \part{Implementation}
 \label{part:impl}
 
 \section{Problem generator}
+\label{sec:pgen}
 
 All problem-specific code lives in \code{pgens/dpdm/pgen.hpp}. It provides three
 things.
@@ -153,8 +663,8 @@ random-start floor within a few $\omega_p^{-1}$.
 
 \subsection{Construction}
 
-The essential requirement --- and the one that took two attempts to get right --- is
-that \textbf{each velocity class must itself be a uniform lattice over the box}. Then
+The essential requirement is that \textbf{each velocity class must itself be a uniform
+lattice over the box}. Then
 under free streaming a class merely translates, and a $\Delta x$-spaced lattice
 deposits \emph{exactly} uniform density at any translation, because the shape function
 is a partition of unity at that spacing. Indexing by velocity class rather than by
@@ -185,12 +695,12 @@ Four properties, each doing a specific job:
         independent of how MPI decomposes the domain.
 \end{itemize}
 
-\paragraph{The failed first design, and why.} The initial implementation tied the
-velocity to the sub-cell \emph{slot} with a per-cell rotation. A given velocity then
-sits at a different offset in each cell, the classes shear apart as soon as particles
-move, and the measured result was $\delta n/n = 6.3\times10^{-3}$ after a
-\emph{single} step, with a noise floor only $2\times$ below the random start. Getting
-$t=0$ clean is easy; making the order survive is the actual problem.
+\paragraph{Why not the obvious construction.} Tying the velocity to the sub-cell
+\emph{slot} with a per-cell rotation is the natural first design and it does not work.
+A given velocity then sits at a different offset in each cell, so the classes shear
+apart as soon as particles move: the measured result is $\delta n/n = 6.3\times10^{-3}$
+after a \emph{single} step, with a noise floor only $2\times$ below a random start.
+Getting $t=0$ clean is easy; making the order survive streaming is the requirement.
 
 \paragraph{Velocity normalisation.} The stratified set
 $\{\,\mathrm{probit}((j+\tfrac12)/\Npc)\,\}$ has mean zero by symmetry but variance
@@ -203,6 +713,7 @@ remove. \code{probit} is Acklam's rational approximation plus one Halley step ag
 \code{erfc}, accurate to ${\sim}10^{-16}$ over $q\in[10^{-8},1-10^{-8}]$.
 
 \subsection{Validation}
+\label{sec:quietval}
 
 \begin{table}[h]
 \centering\small
@@ -362,10 +873,9 @@ exists to configure.
 The same exclusion blocks the repository's Kokkos settings file, and a freshly fetched
 Kokkos defaults to \textbf{Serial only}. A Serial build is externally
 indistinguishable from a threaded one and runs ${\sim}112\times$ slower
-(\code{NLWP = 2}, 99.5\% CPU). This cost a 40-minute walltime overrun and two
-incorrect diagnoses (SLURM \code{-c}, then \code{ibrun} binding --- both innocent).
-This is why the cache check at the end of the previous subsection is mandatory and not
-advisory.
+(\code{NLWP = 2}, 99.5\% CPU). Neither SLURM's \code{-c} default nor \code{ibrun}
+binding produces this symptom, so there is no point looking there; the cache check at
+the end of the previous subsection is mandatory rather than advisory.
 
 \paragraph{Trap 3: ADIOS2 target rename.} ADIOS2~2.11 renamed the C++ bindings target
 from \code{cxx11} to \code{cxx} (and \code{cxx11\_mpi} to \code{cxx\_mpi}).
@@ -379,34 +889,14 @@ nodes have no outbound network.
 hierarchy. The halo here is a few ghost cells of three field components, so host
 staging is free at this problem size.
 
-\section{Running on Lonestar6}
+\section{Measured performance}
+\label{sec:perf}
 \label{sec:running}
 
-\subsection{Queues}
+This section records the throughput measurements that the sizing procedure of
+\S\ref{sec:sizing} draws on.
 
-\begin{center}\small
-\begin{tabular}{@{}lrrrrr@{}}
-\toprule
-Partition & MinNode & MaxNode & MaxWall & MaxNodePU & MaxJobsPU \\
-\midrule
-\code{development}    & 1 & 8   & 02:00:00   & 8  & 1  \\
-\code{normal}         & 1 & 64  & 2-00:00:00 & 64 & 20 \\
-\code{gpu-a100}       & 1 & 8   & 2-00:00:00 & 12 & 8  \\
-\code{gpu-a100-dev}   & 1 & 2   & 02:00:00   & 2  & 1  \\
-\code{gpu-a100-small} & 1 & 1   & 2-00:00:00 & 3  & 3  \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-Anything under 2\,h and $\le 8$ nodes belongs in \code{development}: turnaround there
-was measured at 9\,s and 70\,s for jobs that never started at all in \code{normal}.
-\code{MaxJobsPU = 1} only means short jobs run back-to-back, which is still far faster
-than waiting on \code{normal} priority. \code{gpu-a100} nodes carry three A100-40GB
-each and bill at weight 128; \code{gpu-a100-small} nodes carry one and bill at 32,
-which makes them the correct target for single-GPU production.
-
-\subsection{Measured performance}
-\label{sec:perf}
+\subsection{Throughput}
 
 \begin{table}[h]
 \centering\small
@@ -421,6 +911,7 @@ $3\times$ A100 (one node)  & 128         & $2.07\times$ over 1 GPU, 69\% efficie
 \bottomrule
 \end{tabular}
 \caption{Measured on $4\times10^8$ particles, $N_x = 1000$.}
+\label{tab:perf}
 \end{table}
 
 A single A100 outperforms an entire 128-core node by $3.6\times$. The feared collapse
@@ -432,67 +923,17 @@ therefore in atomic contention per cell --- cost only a factor $1.42$
 \subsection{Per-step cost doubles after saturation}
 \label{sec:slowdown}
 
-This is the most expensive lesson of the project and it governs all walltime planning.
+This governs all walltime planning.
 
 On a single A100 at $\Npc = 2\times10^5$ the cost is $265$\,ms/step while the plasma is
 laminar and $516$\,ms/step once it saturates and becomes turbulent --- particles
 disorder, and the memory locality the early rate depended on is lost. A 2000-step
-benchmark ($\wpt = 40$) showed a dead-flat $265$\,ms and was taken as evidence of
-stability. It was nothing of the kind: the run saturates at $\wpt \approx 2000$, so the
-benchmark never left the laminar phase. The slow resonance case consequently overran a
-48\,h wall at 88\% completion and required a checkpoint restart.
+benchmark ($\wpt = 40$) shows a dead-flat $265$\,ms, which is \emph{not} evidence of
+stability: the run saturates at $\wpt \approx 2000$, so such a benchmark never leaves
+the laminar phase. Taken at face value it overran a 48\,h wall at 88\% completion on
+the slow resonance case, which then required a checkpoint restart.
 
 \textbf{Rule: benchmark across the physics transition, or budget a factor two.}
-
-\subsection{Checkpointing}
-
-Checkpoints are written by \code{[checkpoint] interval\_time} with \code{keep}
-retained, and a run resumes with the \code{-resume} flag (aliases \code{-continue},
-\code{-restart}, \code{-checkpoint}); \textsc{Entity} selects the checkpoint
-automatically. This recovered the slow resonance case after its walltime overrun.
-
-\textbf{The domain count is locked by the checkpoint format}: an $N$-domain checkpoint
-can only be resumed by $N$ domains. A single-GPU checkpoint cannot be resumed by a
-3-GPU MPI binary. The GPU/rank count must therefore be decided before the first
-submission of any run that may need to restart.
-
-\subsection{Queue behaviour dominates scaling}
-
-On a saturated machine, queue wait swamps compute. Multi-GPU benchmark jobs requesting
-2 and 4 nodes sat unscheduled for 30 hours and were eventually cancelled, while
-single-node jobs ran within minutes. A 12-GPU configuration with a theoretical 6\,h
-runtime is worthless if it waits 30\,h for four contiguous nodes. \textbf{Prefer fewer
-nodes than the scaling curve alone would suggest.}
-
-\subsection{Operational traps}
-
-\begin{enumerate}[nosep]
-  \item \code{ppc0} must be a TOML \emph{float}. \code{ppc0 = 2000} parses as an
-        integer and \textsc{Entity} aborts with
-        \code{toml::value::as\_floating(): bad\_cast}. Write \code{2000.0}. This caused
-        two separate job failures.
-  \item Default logging is two firehoses. \code{<name>.log} is a verbose kernel trace
-        at ${\sim}4$\,kB \emph{per step} (governed by \code{log\_level}), and
-        \code{<name>.out} is a progress bar redrawn every step (governed by
-        \code{interval}). Defaults produced 107\,MB of text beside 75\,kB of science on
-        a $2\times10^4$-step run, written synchronously to the parallel filesystem. Set
-        \code{log\_level = "WARNING"}, \code{interval = 200},
-        \code{colored\_stdout = false}.
-  \item \code{[output.spectra]} defaults to \emph{on}. Disable it explicitly.
-  \item \textsc{Entity} races on output-directory creation under MPI: every rank calls
-        \code{mkdir} on \code{<simulation.name>/} and the losers abort with
-        \code{filesystem error: cannot create directory: File exists}, exit 255, within
-        seconds --- which resembles a suspiciously fast run. Pre-create
-        \code{<rundir>/<name>/} in the batch script.
-  \item The stats CSV header uses literal names (\code{E1\^{}2}, \code{J.E}); the enum
-        lookup is lowercase \code{"j.e"} and \code{"JdotE"} aborts. \code{T00} alone
-        gives the summed value --- per-species requires \code{T00\_1}, \code{T00\_2}.
-  \item Per-species stats force a moment reduction over all particles; at
-        \code{interval\_time = 0.1} this doubled wall-clock. Keep it $\ge 1.0$.
-  \item \code{blocking\_timers = true} is the first move on any performance surprise.
-        It prints a per-kernel breakdown with ns-per-particle, and answered in nine
-        seconds a question that two rounds of speculation had got wrong.
-\end{enumerate}
 
 \clearpage
 \part{Runs, settings, and comparison with the paper}
@@ -664,33 +1105,42 @@ post-saturation slowdown, a single GPU would need ${\sim}168$\,h; three reduce t
 ${\sim}81$\,h. Because the checkpoint domain count is locked, this must be chosen at
 first submission.
 
-\section{Corrections to earlier analysis}
+\section{Superseded results}
 \label{sec:corrections}
 
-Three conclusions reached early in this project were wrong and propagated into
-planning before being caught. They are recorded because each was confidently held.
+Three figures appearing in earlier drafts of these notes, and in comments still present
+in some older scripts, are wrong. They are listed so that they are recognisable if
+encountered --- not as a history.
 
-\begin{enumerate}
-  \item \textbf{``The shot-noise floor is $650\times$ below Eq.~B4.''} False --- a
-        units error. $N_p$ in $\epsilon_{\rm noise} = L^2/(12N_pN_x)$ is the
-        \emph{total} macroparticle count, which the paper states explicitly; it was
-        read as per-cell. Correctly evaluated, Eq.~B4 agrees with measurement at a flat
-        $3.1\times$ across three decades of $\Npc$. The formula is sound and should be
-        used to size particle counts.
-  \item \textbf{``The quiet start makes the noise requirement irrelevant.''} False. The
-        paper uses a quiet start \emph{and} still requires large $\Npc$, because the
-        ordered state relaxes to the thermal shot-noise floor within
-        $\wpt \approx 5000$ (\S\ref{sec:quietrelax}).
-  \item \textbf{``Per-step cost is stable.''} False, and expensive. It roughly doubles
-        once the plasma saturates. The 2000-step benchmark that appeared to establish
-        stability covered only the laminar phase --- $0.4\%$ of the production run, and
-        entirely before the physics transition.
-\end{enumerate}
+\begin{center}\small
+\begin{tabular}{@{}p{4.6cm}p{9.8cm}@{}}
+\toprule
+Superseded claim & Correct statement \\
+\midrule
+``The shot-noise floor is $650\times$ below Eq.~B4.''
+& A units error. $N_p$ in $\epsilon_{\rm noise} = L^2/(12N_pN_x)$ is the \emph{total}
+  macroparticle count, which the paper states explicitly; it was read as per-cell.
+  Correctly evaluated, Eq.~B4 agrees with measurement at a flat $3.1\times$ across three
+  decades of $\Npc$, and is the right tool for sizing runs (\S\ref{sec:sizing}). \\
+\addlinespace
+``A quiet start removes the large-$\Npc$ requirement.''
+& It does not. The ordered state relaxes to the thermal shot-noise floor by
+  $\wpt \approx 5000$ (\S\ref{sec:quietrelax}); the paper uses a quiet start \emph{and}
+  still requires large $\Npc$. A quiet start buys a clean $t=0$, nothing more. \\
+\addlinespace
+``Per-step cost is stable.''
+& It roughly doubles once the plasma saturates (\S\ref{sec:slowdown}). A benchmark
+  confined to the laminar phase --- $0.4\%$ of a production run, and entirely before the
+  physics transition --- measures the wrong number. \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-A common thread: each was an extrapolation from a measurement taken outside the regime
-where it was then applied. The cost model itself was calibrated at $\Npc \le 8000$ and
-subsequently failed in both directions --- predicting 8~minutes for a run that took 41,
-and 97~seconds of stepping for one that exceeded 40~minutes.
+\noindent All three share a failure mode worth guarding against generally: each
+extrapolated a measurement taken outside the regime where it was then applied. The cost
+model in particular was calibrated at $\Npc \le 8000$ and subsequently failed in both
+directions, predicting 8~minutes for a run that took 41, and 97~seconds of stepping for
+one that exceeded 40~minutes.
 
 \section{Status and remaining work}
 
