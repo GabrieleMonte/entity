@@ -1,0 +1,9 @@
+# LaTeX build products. main.pdf IS tracked -- it is the deliverable.
+*.aux
+*.log
+*.fls
+*.fdb_latexmk
+*.toc
+*.out
+*.synctex.gz
+build.log

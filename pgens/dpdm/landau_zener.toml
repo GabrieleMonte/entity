@@ -1,0 +1,92 @@
+# Dark-photon dark matter resonant conversion, Hook, Huang & Shalaby
+# arXiv:2510.13956, swept-frequency ("Landau-Zener") run family.
+#
+# Code-unit calibration (validated against linear theory, see notes below):
+#   skindepth0 = 1, densities = [2.0]  =>  n_e = n0  =>  omega_pe = 1 exactly
+#   A0 = v_q^D / c = (v_q^D / vth^e) * sqrt(1e-3)
+#   measured:  eps_E + dKE_e + dKE_i = (A0^2/8) (omega_p t)^2  to 0.5%
+#   measured shot-noise floor:  eps_noise = 2.06e-4 / ppc0   [n_e m_e c^2]
+#
+# A0 = 3.16228e-3 is v_q^D/vth^e = 0.1.
+
+[simulation]
+  name    = "dpdm_lz"
+  engine  = "srpic"
+  runtime = 20000.0                     # omega_p t
+
+[grid]
+  resolution = [1000]
+  extent     = [[0.0, 40.0]]           # dx = 0.04 c/omega_p ~ lambda_D
+
+  [grid.metric]
+    metric = "minkowski"
+
+  [grid.boundaries]
+    fields    = [["PERIODIC"]]
+    particles = [["PERIODIC"]]
+
+[scales]
+  skindepth0 = 1.0
+  larmor0    = 1.0
+
+[algorithms]
+  # KEEP LOW: the saturation physics lives at high k (modulational and
+  # ion-acoustic daughters up to k*lambda_D ~ 1)
+  current_filters = 0
+
+  [algorithms.timestep]
+    CFL = 0.5                          # dt = 0.02 / omega_p
+
+[particles]
+  ppc0 = 2000.0                        # per species; eps_noise = 2.06e-4/ppc0
+
+  [[particles.species]]
+    label    = "e-"
+    mass     = 1.0
+    charge   = -1.0
+    maxnpart = 2.5e6                   # > ppc0 * density * 0.5 * ncells
+    pusher   = "Vay"
+
+  [[particles.species]]
+    label    = "i+"
+    mass     = 1836.0
+    charge   = 1.0
+    maxnpart = 2.5e6
+    pusher   = "Vay"
+
+[setup]
+  # per species pair, in units of n0; [2.0] puts n_e = n0 so omega_pe = 1
+  densities    = [2.0]
+  # in units of m0 c^2; injector divides by species mass, so both are 1e-3 m_e c^2
+  temperatures = [1.0e-3, 1.0e-3]
+  drive        = "landau_zener"
+  A0           = 3.16228e-3
+  # phase is integrated analytically as w0*t + dw/dt*t^2/2 in the pgen;
+  # sampling omega(t) and multiplying by t accumulates a spurious chirp
+  omega0       = 0.8
+  domega_dt    = 2.0e-5              # 0.1 omega_p over omega_p t = 5000
+
+[output]
+  interval_time = 25.0
+
+  [output.fields]
+    quantities = ["E", "N_1", "N_2", "Rho", "J", "T00_1", "T00_2"]
+
+  [output.particles]
+    species = [1, 2]
+    stride  = 200
+
+  [output.stats]
+    enable = true
+    # NOTE: per-species T00 forces a moment reduction over all particles, which
+    # costs ~1 step of pushing. Keep this >= 1.0 or it doubles the runtime.
+    interval_time = 1.0
+    quantities    = ["E^2", "T00_1", "T00_2", "J.E"]
+    custom        = ["e_ext"]
+
+  [output.spectra]
+    enable = false
+
+[checkpoint]
+  interval_time = 500.0
+  keep          = 2

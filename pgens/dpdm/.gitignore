@@ -1,0 +1,10 @@
+# SLURM job logs and local scratch
+sbatch_logs/
+*.o[0-9]*
+*.e[0-9]*
+*.bak
+__pycache__/
+
+# Upstream's root .gitignore excludes *.ipynb; the run34 plotting notebook is
+# part of this work's deliverable, so re-include it here.
+!*.ipynb
