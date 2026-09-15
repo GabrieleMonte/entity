@@ -130,6 +130,12 @@ Path (under repository root) & Contents \\
 \code{diag\_slow.sh}, \code{diag\_growth.sh}, \code{affinity\_test.sh} & Diagnostics for
                              performance and thread-placement questions. \\
 \midrule
+\multicolumn{2}{@{}l}{\textit{\code{pgens/dpdm/paper/} --- analysis pipeline for the paper-faithful runs}}\\
+\code{extract\_paper.py}   & Reduces \code{fast}, \code{slow}, \code{lz1p0}, \code{heat}
+                             and the quiet/random pair to \code{.npz}
+                             (\S\ref{sec:analysis}). \\
+\code{PLOTS.md}            & The six plots those runs support, and what each claims. \\
+\midrule
 \multicolumn{2}{@{}l}{\textit{\code{pgens/dpdm/run34/} --- the resonance-ladder survey and its analysis pipeline}}\\
 \code{run34.sh}            & Eight-run ladder in $v_q^D/\vth$ plus two convergence runs. \\
 \code{extract\_run34.py}   & Reduces ADIOS2 output to \code{.npz} (\S\ref{sec:analysis}). \\
@@ -506,6 +512,16 @@ intended route for analysing on a laptop: reduce on the cluster, download the
 energy budget (paper Fig.~2), the $E(k,t)$ and $n(k,t)$ spectra that show
 \emph{why} it saturates, the $N_p$ convergence gate, and the fast/slow regime
 transition. \code{run34\_plots.ipynb} produces them from the \code{.npz}.
+
+\code{pgens/dpdm/paper/extract\_paper.py} is the same pipeline for the production
+runs, which \code{run34} cannot substitute for: \code{run34} is a random-start survey
+at a uniform $\Npc = 2000$ out to $\wpt = 3000$, whereas these are quiet-start, at the
+paper's own $\Npc$, and include the swept-frequency family. It covers \code{fast},
+\code{slow}, \code{lz1p0}, \code{heat} and the \code{undriven\_q}/\code{undriven\_r}
+pair, adding $(x,u_x)$ phase-space histograms to the products, and reduces
+${\sim}1.9$\,GB of \code{.bp} to ${\sim}50$\,MB. Stage the runs without their
+checkpoint directories first --- \code{slow} alone carries 75\,GB of checkpoints
+beside 483\,MB of science. \code{paper/PLOTS.md} states the six plots.
 
 \section{Sizing a new run}
 \label{sec:sizing}
