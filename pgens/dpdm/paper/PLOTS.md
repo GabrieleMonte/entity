@@ -66,8 +66,7 @@ factor of 2 across the whole sweep.
 
 ## Plot C — quiet vs random loading. **The method gate.**
 
-`undriven_q_*` and `undriven_r_*` overlaid. Identical decks; `loading` is the *only*
-difference. Two panels:
+`undriven_q_*` and `undriven_r_*` overlaid. Two panels:
 
 1. `eps_E(t)` from `_stats.npz`, log-y, both runs, with `eps_noise = 3.22e-6` marked.
 2. `dn_over_n` from `_fields.npz`: rms over `x` vs `t`, both runs.
@@ -86,6 +85,17 @@ textbook shot noise and the quiet run has none. `eps_E` differs by ~13 orders.
 > loaders — Entity initialises `E` to zero identically and both co-locate the species.
 > The channel that matters is the **total** density `n_e + n_i`, which is what
 > `dn_over_n` holds, because `ωₚ ∝ √n`.
+
+> **These two runs are 1V and 3V respectively — do not plot raw `T00_1` for both.**
+> `setup.one_v` is honoured only by the quiet loader (`pgen.hpp:199`); the random path
+> calls `arch::InjectUniformMaxwellians`, Entity's stock *isotropic* injector, which
+> ignores it (`pgen.hpp:340`). Measured: `2*(T00_1−1)/Te_particles` is `0.9993` for
+> `undriven_q` (the 0.07% is the relativistic γ term) and `3.00` for `undriven_r`.
+> The comparison is still sound — `uy`, `uz` feel no force in a 1D electrostatic run,
+> and the `ux` distributions match (`1.0000e-3` vs `1.0012e-3`) — but `T00_1` alone
+> shows a 3× step that is pure bookkeeping and looks like a temperature difference.
+> Use `Te` from `_stats.npz`, which divides the right `n_dof` out; it is recorded per
+> run in `meta.json`.
 
 ## Plot D — what the quiet start does *not* buy. **The sizing result.**
 
@@ -128,7 +138,10 @@ start, so the *onset* is trustworthy rather than seeded by initial noise.
 ## Plot F — phase space. **The one to animate.**
 
 `<tag>_phase.npz`: `H_e`, `H_i` of shape `(60, 240, 240)`, with `x_edges`,
-`u_edges_e`, `u_edges_i`, `t`. 60 frames spanning the run, fixed axes.
+`u_edges_e`, `u_edges_i`, `t`. 60 frames spanning the run, fixed axes. `Te_check` and
+`Ti_check` on the same frames cross-check the `Te`/`Ti` in `_stats.npz`, which are the
+ones to plot — they come from `T00` and are sampled far more finely (10720 rows for
+`slow` against 500 dumps).
 
 ```python
 plt.pcolormesh(ph["x_edges"], ph["u_edges_e"], ph["H_e"][i].T, ...)

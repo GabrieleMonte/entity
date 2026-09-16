@@ -48,8 +48,9 @@ INPUT LAYOUT -- <paper_dir>/<tag>/<tag>/{fields,particles}/*.bp
 OUTPUT -- paper_npy/
     <tag>_stats.npz    scalar time series          Plots A, B, C, D
     <tag>_fields.npz   real space + k space        Plots C, E
-    <tag>_temps.npz    T_e, T_i per particle dump  Plots B, D
-    <tag>_phase.npz    (x, ux) histograms          Plot F  -- the "display" one
+    <tag>_phase.npz    (x, ux) histograms + a T_e cross-check   Plot F
+                       T_e(t) and T_i(t) themselves live in _stats.npz, derived
+                       from T00 -- see the n_dof note in read_stats().
     summary.npz        one row per run             Plots A, B
     meta.json          every constant, per run
 
@@ -76,6 +77,7 @@ physical quantities"), restated because they change conclusions by factors:
 """
 import json
 import os
+import time
 import warnings
 
 import numpy as np
@@ -107,8 +109,16 @@ CHUNK = 25
 # Phase-space frames to keep per run.  A 240x240 float32 histogram is 230 kB, so
 # 60 frames x 2 species is ~28 MB -- enough for a smooth movie, small enough to
 # download.  Every particle dump is still used for the T_e/T_i time series.
-PHASE_FRAMES = 60
+PHASE_FRAMES = int(os.environ.get("PHASE_FRAMES", "60"))
 PHASE_BINS   = 240
+
+# Cost note, measured: a particle load is ~1.8 s per species per frame on a
+# 20-dump series (login node, 1 core). What is NOT measured is how that scales
+# with series length -- `slow` has 500 dumps and `fast` 1000, and the old
+# every-dump version was far slower than a flat per-load cost would predict,
+# which suggests each isel(t=i) pays something proportional to the series. If
+# the timings in the log show phase() dominating, drop PHASE_FRAMES to 30 and
+# resubmit; a 30-frame movie is still perfectly watchable.
 
 VTH_E          = np.sqrt(1e-3)   # 0.0316 c
 EPS_THERMAL_1V = 0.5 * 1e-3      # 5e-4  -- the reference line, 1V not 3V
@@ -155,7 +165,7 @@ def rundir(tag):
 #     -- all four read only this, from the plain-text stats CSV.  No nt2 needed,
 #        so this half of the script runs anywhere in seconds.
 # ============================================================================
-def read_stats(tag):
+def read_stats(tag, n_dof, rest_e=1.0, rest_i=1836.0):
     """
     -> dict of 1D arrays over the stats cadence.
 
@@ -165,6 +175,21 @@ def read_stats(tag):
       dKE_e    T00_1 - T00_1[0]      electron kinetic energy change
       dKE_i    T00_2 - T00_2[0]      ion kinetic energy change
       eps_tot  eps_E + dKE_e         <-- THIS obeys the (A0^2/8)t^2 law
+      Te, Ti   kT per species, from T00 rather than from the particles:
+                   kT = (2/n_dof) * (T00_s - rest_s),  rest_e = n_e*m_e = 1,
+                   rest_i = n_i*m_i = 1836.
+               n_dof MATTERS AND IS NOT ALWAYS 1.  setup.one_v is honoured only
+               by the QUIET loader (pgen.hpp:199); the random path calls
+               arch::InjectUniformMaxwellians, which is Entity's stock ISOTROPIC
+               3V injector and ignores it (pgen.hpp:340).  So undriven_r carries
+               three velocity components where undriven_q carries one, and its
+               T00_1 is 3x larger for the same physical temperature.  Verified:
+               2*(T00_1-1)/Te_particles is 0.9993 for the quiet run (the 0.07%
+               is the relativistic gamma term) and 3.00 for the random one.
+               The uy, uz energy is dynamically inert -- there are no transverse
+               forces in a 1D electrostatic run -- so the physics is unaffected,
+               but plotting raw T00_1 for both runs on one axis shows a 3x step
+               that is pure bookkeeping.
       Te_rel   T00_1 / T00_1[0]      relative drift; the heating gate reads this
       JdotE    work done by the field on the particles
       e_ext    the drive itself, present only if the deck asked for it.  For the
@@ -184,7 +209,10 @@ def read_stats(tag):
     dKE_e  = T1 - T1[0]
     out = dict(t=g("time"), eps_E=eps_E, dKE_e=dKE_e, dKE_i=T2 - T2[0],
                eps_tot=eps_E + dKE_e, T00_1=T1, T00_2=T2,
-               Te_rel=T1 / T1[0], Ti_rel=T2 / T2[0])
+               Te_rel=T1 / T1[0], Ti_rel=T2 / T2[0],
+               Te=(2.0 / n_dof) * (T1 - rest_e),
+               Ti=(2.0 / n_dof) * (T2 - rest_i),
+               n_dof=np.array([n_dof]))
     for opt in ("J.E", "e_ext"):
         if opt in have:
             out[{"J.E": "JdotE", "e_ext": "e_ext"}[opt]] = g(opt)
@@ -265,36 +293,36 @@ def read_fields(data):
 #                                               this falls back to the CSV)
 # PLOT F  phase space (x, ux)                  (fast, slow, lz1p0)
 # ============================================================================
-def read_particles(data, x_max):
+def read_phase(data, x_max, n_frames):
     """
-    One pass over the particle dumps, producing two things.
+    -> t, x_edges, u_edges_{e,i}, H_e, H_i, and Te/Ti sampled at the same frames.
 
-    moments (every dump):  t, Te, Ti, u_e, u_i
-        PARALLEL temperature only, from the ux variance weighted by the
-        macroparticle weight w:
-            kT_par/(m c^2) = mass * <w (ux - <ux>_w)^2>_w
-        Non-relativistic here (vth_e = 0.03 c) so u = gamma*v ~= v and no gamma
-        correction is needed.  These runs are 1V (uy = uz = 0), so this is the
-        whole temperature, not a projection.
+    2D histograms of (x, ux) weighted by w, on PHASE_FRAMES evenly spaced dumps.
+    The u range is fixed across time from a scan of the first/middle/last frames,
+    so frames animate without the axes jumping.  Histogramming rather than
+    storing particles keeps this at tens of MB instead of gigabytes.
 
-    phase (PHASE_FRAMES evenly spaced dumps):  t_phase, x_edges, u_edges_{e,i},
-                                               H_e, H_i
-        2D histograms of (x, ux), weighted by w.  The u range is fixed across
-        time from a scan of the first/middle/last frames, so frames can be
-        animated without the axes jumping.  Histogramming rather than storing
-        particles keeps this at ~28 MB instead of gigabytes.
+    WHY ONLY THE FRAMES.  An earlier version read EVERY particle dump to build a
+    T_e(t) series.  That is what made this untenable: it timed out after 1h47m on
+    `slow` alone (500 dumps x 2 species) without finishing, and `fast` is 1000.
+    The series is unnecessary -- kT comes from T00 in the stats CSV, which is
+    sampled far more finely anyway (10720 rows for `slow` against 500 dumps).
+    The moments computed here are kept only as a cross-check of that derivation,
+    since the particles are being loaded regardless.
+
+    The parallel temperature is  kT_par/(m c^2) = mass * <w (ux - <ux>_w)^2>_w.
+    Non-relativistic here (vth_e = 0.03 c) so u = gamma*v ~= v.
     """
-    p = data.particles
+    p     = data.particles
     times = np.asarray(p.times, dtype=np.float64)
     n_t   = times.size
+    frames = np.unique(np.linspace(0, n_t - 1, min(n_frames, n_t)).astype(int))
 
-    frames = np.unique(np.linspace(0, n_t - 1, min(PHASE_FRAMES, n_t)).astype(int))
-
-    # --- fix the velocity range once, from a scan, so the movie axes hold still
+    # --- fix the velocity range once, so the movie axes hold still
     urange = {1: 0.0, 2: 0.0}
-    for i in (0, n_t // 2, n_t - 1):
+    for i in (frames[0], frames[len(frames) // 2], frames[-1]):
         for sp in (1, 2):
-            u = data.particles.isel(t=i).sel(sp=sp).load(cols=["ux"])["ux"]
+            u = p.isel(t=int(i)).sel(sp=sp).load(cols=["ux"])["ux"]
             urange[sp] = max(urange[sp],
                              float(np.percentile(np.abs(np.asarray(u)), 99.9)))
     for sp in (1, 2):
@@ -304,40 +332,25 @@ def read_particles(data, x_max):
     u_edges = {sp: np.linspace(-urange[sp], urange[sp], PHASE_BINS + 1)
                for sp in (1, 2)}
 
-    mom = {1: ([], []), 2: ([], [])}
-    H   = {1: [], 2: []}
-    t_out, t_phase = [], []
-
-    for i in range(n_t):
-        snap = p.isel(t=i)
-        want_frame = i in frames
+    H, mom = {1: [], 2: []}, {1: [], 2: []}
+    for i in frames:
+        snap = p.isel(t=int(i))
         for sp in (1, 2):
-            df = snap.sel(sp=sp).load(
-                cols=["ux", "w", "x"] if want_frame else ["ux", "w"])
+            df = snap.sel(sp=sp).load(cols=["ux", "w", "x"])
             u = df["ux"].to_numpy(dtype=np.float64)
             w = df["w"].to_numpy(dtype=np.float64)
             wsum = w.sum()
             mu   = (w * u).sum() / wsum
-            var  = (w * (u - mu) ** 2).sum() / wsum
-            mom[sp][0].append(mu)
-            mom[sp][1].append(var)
-            if want_frame:
-                h, _, _ = np.histogram2d(
-                    df["x"].to_numpy(dtype=np.float64), u,
-                    bins=[x_edges, u_edges[sp]], weights=w)
-                H[sp].append(h.astype(np.float32))
-        t_out.append(float(times[i]))
-        if want_frame:
-            t_phase.append(float(times[i]))
+            mom[sp].append((w * (u - mu) ** 2).sum() / wsum)
+            h, _, _ = np.histogram2d(df["x"].to_numpy(dtype=np.float64), u,
+                                     bins=[x_edges, u_edges[sp]], weights=w)
+            H[sp].append(h.astype(np.float32))
 
-    moments = dict(t=np.array(t_out),
-                   Te=np.array(mom[1][1]) * 1.0,        # m_e = 1
-                   Ti=np.array(mom[2][1]) * MI_ME,
-                   u_e=np.array(mom[1][0]), u_i=np.array(mom[2][0]))
-    phase = dict(t=np.array(t_phase), x_edges=x_edges,
-                 u_edges_e=u_edges[1], u_edges_i=u_edges[2],
-                 H_e=np.stack(H[1]), H_i=np.stack(H[2]))
-    return moments, phase
+    return dict(t=times[frames], x_edges=x_edges,
+                u_edges_e=u_edges[1], u_edges_i=u_edges[2],
+                H_e=np.stack(H[1]), H_i=np.stack(H[2]),
+                Te_check=np.array(mom[1]) * 1.0,          # m_e = 1
+                Ti_check=np.array(mom[2]) * MI_ME)
 
 
 def deck_value(tag, key, default=None):
@@ -364,36 +377,57 @@ def main():
         if not os.path.isdir(rundir(tag)):
             print(f"[{tag}] not present, skipping")
             continue
-        meta_only = (os.path.exists(os.path.join(out_dir, f"{tag}_fields.npz"))
-                     and not force)
-        if meta_only:
-            # summary.npz still needs the stats, but they are cheap to re-read.
-            st = read_stats(tag)
-            print(f"[{tag}] already extracted, skipping (FORCE=1 to redo)",
-                  flush=True)
-        else:
-            print(f"[{tag}]", end=" ", flush=True)
 
-        if not meta_only:
-            st = read_stats(tag)
+        # setup.one_v is honoured only by the quiet loader; the random path gets
+        # Entity's stock isotropic 3V injector regardless (pgen.hpp:199, 340).
+        quiet  = deck_value(tag, "loading", "random") == "quiet"
+        one_v  = str(deck_value(tag, "one_v", "true")).lower() != "false"
+        n_dof  = 1 if (quiet and one_v) else 3
+
+        st = read_stats(tag, n_dof)          # always cheap; summary needs it
+
+        # Per-product resume.  The sentinel must be the product itself, not the
+        # run: a job killed midway through `slow` left slow_fields.npz on disk
+        # with no slow_phase.npz beside it, and a whole-run sentinel would have
+        # skipped it on resubmit and silently shipped an incomplete set.
+        def need(kind):
+            return force or not os.path.exists(
+                os.path.join(out_dir, f"{tag}_{kind}.npz"))
+
+        print(f"[{tag}] n_dof={n_dof}", end=" ", flush=True)
+        if need("stats"):
             np.savez_compressed(os.path.join(out_dir, f"{tag}_stats.npz"), **st)
             print(f"stats({st['t'].size})", end=" ", flush=True)
 
-        data = None if meta_only else nt2.Data(rundir(tag))
+        if need("fields") or need("phase"):
+            t_open = time.time()
+            data = nt2.Data(rundir(tag))
+            print(f"open({time.time() - t_open:.0f}s)", end=" ", flush=True)
 
-        if not meta_only:
-            fl = read_fields(data)
-            np.savez_compressed(os.path.join(out_dir, f"{tag}_fields.npz"), **fl)
-            print(f"fields({fl['t'].size})", end=" ", flush=True)
+            if need("fields"):
+                t0 = time.time()
+                fl = read_fields(data)
+                np.savez_compressed(os.path.join(out_dir, f"{tag}_fields.npz"),
+                                    **fl)
+                print(f"fields({fl['t'].size} in {time.time() - t0:.0f}s)",
+                      end=" ", flush=True)
+                x_max = float(fl["x"][-1])
+            else:
+                x_max = 40.0
 
             # heat wrote no particle dumps -- it is a stats-only run by design.
-            try:
-                mo, ph = read_particles(data, x_max=float(fl["x"][-1]))
-                np.savez_compressed(os.path.join(out_dir, f"{tag}_temps.npz"), **mo)
-                np.savez_compressed(os.path.join(out_dir, f"{tag}_phase.npz"), **ph)
-                print(f"temps({mo['t'].size}) phase({ph['t'].size})", flush=True)
-            except Exception as exc:
-                print(f"no particles ({type(exc).__name__})", flush=True)
+            if need("phase"):
+                t0 = time.time()
+                try:
+                    ph = read_phase(data, x_max, PHASE_FRAMES)
+                    np.savez_compressed(
+                        os.path.join(out_dir, f"{tag}_phase.npz"), **ph)
+                    print(f"phase({ph['t'].size} in {time.time() - t0:.0f}s)",
+                          end=" ", flush=True)
+                except Exception as exc:
+                    print(f"no particles ({type(exc).__name__})",
+                          end=" ", flush=True)
+        print(flush=True)
 
         A0   = deck_value(tag, "A0", 0.0)
         npc  = deck_value(tag, "ppc0")

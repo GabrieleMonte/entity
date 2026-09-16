@@ -20,13 +20,23 @@
 # .bp at open, and `fast` has 1000 field dumps. On a login node that dies with
 # "FFS out of memory" before returning. A compute node has 256 GB.
 #
-# Walltime: the particle loop dominates at ~1 s per dump per species, and there
-# are 3000 dump-species in total, so this is expected to take 60-90 min against
-# the 2 h development cap. The runs are ordered cheapest-first and already
-# extracted runs are skipped, so if it does hit the wall just resubmit -- it
-# picks up where it stopped. FORCE=1 redoes everything.
+# Walltime: job 3443843 TIMED OUT at 2 h in an earlier version that read every
+# particle dump to build a T_e(t) series -- it spent 1h47m on `slow` alone
+# (500 dumps x 2 species) without finishing, and `fast` is 1000. That series was
+# unnecessary: T_e comes from T00 in the stats CSV, sampled far more finely. Only
+# the PHASE_FRAMES (60) dumps per run are read now, which is 8x less work for
+# `slow` and 17x less for `fast`.
+#
+# Resume is per PRODUCT, not per run: a killed job left slow_fields.npz with no
+# slow_phase.npz beside it, and a per-run sentinel would have skipped `slow` on
+# resubmit and shipped an incomplete set. Resubmitting now does only what is
+# missing. FORCE=1 redoes everything.
+#
+# Each stage prints its own timing -- open(Ns) fields(N in Ns) phase(N in Ns) --
+# so the log says where the time actually went rather than leaving it to guesswork.
 #
 # Output: $SCRATCH/dpdm_npy/  (~50 MB), plus a tarball to scp home.
+# PHASE_FRAMES=30 sbatch extract_paper.sh  halves the particle work if needed.
 
 set -u
 
