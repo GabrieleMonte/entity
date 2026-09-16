@@ -20,21 +20,24 @@
 # .bp at open, and `fast` has 1000 field dumps. On a login node that dies with
 # "FFS out of memory" before returning. A compute node has 256 GB.
 #
-# Walltime: job 3443843 TIMED OUT at 2 h in an earlier version that read every
-# particle dump to build a T_e(t) series -- it spent 1h47m on `slow` alone
-# (500 dumps x 2 species) without finishing, and `fast` is 1000. That series was
-# unnecessary: T_e comes from T00 in the stats CSV, sampled far more finely. Only
-# the PHASE_FRAMES (60) dumps per run are read now, which is 8x less work for
-# `slow` and 17x less for `fast`.
+# Walltime: two jobs (3443843, 3445746) hit the 2 h wall before the cause was
+# measured rather than guessed at. It is not the volume of data. nt2.Data() pays
+# a cost proportional to how many .bp are IN the series, and every isel(t=i)
+# inherits it. Measured on `slow` (540 field + 500 particle dumps):
 #
-# Resume is per PRODUCT, not per run: a killed job left slow_fields.npz with no
-# slow_phase.npz beside it, and a per-run sentinel would have skipped `slow` on
-# resubmit and shipped an incomplete set. Resubmitting now does only what is
-# missing. FORCE=1 redoes everything.
+#     full series             open 1049 s,  ~43 s per particle load
+#     8-dump symlink subset   open  9.2 s,   1.2 s per particle load
 #
-# Each stage prints its own timing -- open(Ns) fields(N in Ns) phase(N in Ns) --
-# so the log says where the time actually went rather than leaving it to guesswork.
+# So the script now symlinks just the dumps it wants into a scratch directory and
+# opens that. `slow`'s phase stage went from 90 min unfinished to 25 s for 8
+# frames. FIELD_FRAMES (250) and PHASE_FRAMES (60) set how many are kept; both
+# are finer than a plot can show and both are tunable from the environment.
 #
+# Resume is per PRODUCT and schema-versioned: a file written by an older script
+# is rebuilt rather than skipped, so a partial job can always be resubmitted.
+#
+# Each stage prints its own timing -- open/read per stage -- so the log says
+# where the time went.
 # Output: $SCRATCH/dpdm_npy/  (~50 MB), plus a tarball to scp home.
 # PHASE_FRAMES=30 sbatch extract_paper.sh  halves the particle work if needed.
 

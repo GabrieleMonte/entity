@@ -77,6 +77,8 @@ physical quantities"), restated because they change conclusions by factors:
 """
 import json
 import os
+import shutil
+import tempfile
 import time
 import warnings
 
@@ -113,9 +115,12 @@ CHUNK = 25
 # resume skips products that already exist, and without a version check a file
 # written by an older script survives the skip and silently ships the old schema.
 # That is how the Te/Ti/n_dof fix nearly went missing from four runs.
-SCHEMA = 2
+SCHEMA = 3
 
 PHASE_FRAMES = int(os.environ.get("PHASE_FRAMES", "60"))
+# Field dumps kept for the (k,t) heatmaps. `slow` wrote 540 and `fast` 1000;
+# 250 is already finer than a plot can show, and the cost is per dump.
+FIELD_FRAMES = int(os.environ.get("FIELD_FRAMES", "250"))
 PHASE_BINS   = 240
 
 # Cost note, measured: a particle load is ~1.8 s per species per frame on a
@@ -161,6 +166,47 @@ GROUPS = {
 
 def rundir(tag):
     return os.path.join(paper_dir, tag, tag)
+
+
+def open_subset(tag, kind, n_keep):
+    """
+    Open an nt2.Data over only `n_keep` of a run's dumps, evenly spaced.
+
+    THIS IS THE DIFFERENCE BETWEEN THIS SCRIPT FINISHING AND NOT.  nt2.Data()
+    pays a cost proportional to how many .bp are in the series, and every
+    subsequent isel(t=i) inherits it -- the data actually read is irrelevant.
+    Measured on `slow` (540 field + 500 particle dumps):
+
+        full series          open 1049 s,  ~43 s per particle load
+        8-dump symlink subset  open  9.2 s,   1.2 s per particle load
+
+    114x on the open and 36x per load. Two jobs timed out at the 2 h wall
+    before this was measured rather than assumed.
+
+    So: symlink the wanted dumps into a scratch directory laid out the way nt2
+    expects, and open that instead. Symlinks, so nothing is copied.
+    Returns (data, tmpdir, kept_names); the caller removes tmpdir.
+    """
+    src = os.path.join(rundir(tag), kind)
+    dumps = sorted(d for d in os.listdir(src) if d.endswith(".bp"))
+    if not dumps:
+        raise FileNotFoundError(f"no .bp in {src}")
+    keep = [dumps[i] for i in
+            np.unique(np.linspace(0, len(dumps) - 1,
+                                  min(n_keep, len(dumps))).astype(int))]
+
+    tmp = tempfile.mkdtemp(prefix=f"dpdm_{tag}_{kind}_")
+    leaf = os.path.join(tmp, tag, kind)
+    os.makedirs(leaf)
+    for d in keep:
+        os.symlink(os.path.join(src, d), os.path.join(leaf, d))
+    # nt2 looks for the stats CSV beside the dump directories.
+    csv = os.path.join(rundir(tag), f"{tag}_stats.csv")
+    if os.path.exists(csv):
+        os.symlink(csv, os.path.join(tmp, tag, f"{tag}_stats.csv"))
+
+    import nt2
+    return nt2.Data(os.path.join(tmp, tag)), tmp, keep
 
 
 # ============================================================================
@@ -299,7 +345,7 @@ def read_fields(data):
 #                                               this falls back to the CSV)
 # PLOT F  phase space (x, ux)                  (fast, slow, lz1p0)
 # ============================================================================
-def read_phase(data, x_max, n_frames):
+def read_phase(tag, x_max, n_frames):
     """
     -> t, x_edges, u_edges_{e,i}, H_e, H_i, and Te/Ti sampled at the same frames.
 
@@ -319,10 +365,18 @@ def read_phase(data, x_max, n_frames):
     The parallel temperature is  kT_par/(m c^2) = mass * <w (ux - <ux>_w)^2>_w.
     Non-relativistic here (vth_e = 0.03 c) so u = gamma*v ~= v.
     """
-    p     = data.particles
-    times = np.asarray(p.times, dtype=np.float64)
-    n_t   = times.size
-    frames = np.unique(np.linspace(0, n_t - 1, min(n_frames, n_t)).astype(int))
+    # Open ONLY the frames we want -- see open_subset() for why this matters.
+    data, tmp, _ = open_subset(tag, "particles", n_frames)
+    try:
+        return _phase_from(data)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _phase_from(data):
+    p      = data.particles
+    times  = np.asarray(p.times, dtype=np.float64)
+    frames = np.arange(times.size)
 
     # --- fix the velocity range once, so the movie axes hold still
     urange = {1: 0.0, 2: 0.0}
@@ -334,6 +388,7 @@ def read_phase(data, x_max, n_frames):
     for sp in (1, 2):
         urange[sp] = urange[sp] * 1.15 or 1e-3
 
+    x_max   = 40.0
     x_edges = np.linspace(0.0, x_max, PHASE_BINS + 1)
     u_edges = {sp: np.linspace(-urange[sp], urange[sp], PHASE_BINS + 1)
                for sp in (1, 2)}
@@ -418,32 +473,28 @@ def main():
             save("stats", st)
             print(f"stats({st['t'].size})", end=" ", flush=True)
 
-        if need("fields") or need("phase"):
-            t_open = time.time()
-            data = nt2.Data(rundir(tag))
-            print(f"open({time.time() - t_open:.0f}s)", end=" ", flush=True)
-
-            if need("fields"):
-                t0 = time.time()
+        if need("fields"):
+            t0 = time.time()
+            data, tmp, kept = open_subset(tag, "fields", FIELD_FRAMES)
+            try:
                 fl = read_fields(data)
-                save("fields", fl)
-                print(f"fields({fl['t'].size} in {time.time() - t0:.0f}s)",
-                      end=" ", flush=True)
-                x_max = float(fl["x"][-1])
-            else:
-                x_max = 40.0
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+            save("fields", fl)
+            print(f"fields({fl['t'].size}/{len(kept)} in {time.time() - t0:.0f}s)",
+                  end=" ", flush=True)
 
-            # heat wrote no particle dumps -- it is a stats-only run by design.
-            if need("phase"):
-                t0 = time.time()
-                try:
-                    ph = read_phase(data, x_max, PHASE_FRAMES)
-                    save("phase", ph)
-                    print(f"phase({ph['t'].size} in {time.time() - t0:.0f}s)",
-                          end=" ", flush=True)
-                except Exception as exc:
-                    print(f"no particles ({type(exc).__name__})",
-                          end=" ", flush=True)
+        # heat wrote no particle dumps -- it is a stats-only run by design.
+        if need("phase"):
+            t0 = time.time()
+            try:
+                ph = read_phase(tag, 40.0, PHASE_FRAMES)
+                save("phase", ph)
+                print(f"phase({ph['t'].size} in {time.time() - t0:.0f}s)",
+                      end=" ", flush=True)
+            except Exception as exc:
+                print(f"no particles ({type(exc).__name__})", end=" ", flush=True)
+
         print(flush=True)
 
         A0   = deck_value(tag, "A0", 0.0)
