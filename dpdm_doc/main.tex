@@ -1114,6 +1114,28 @@ the shot noise --- which gives $\Npc = 2.7\times10^3$ and $2.7\times10^5$ for th
 amplitudes. Note that the quiet start does \emph{not} relax this requirement
 (\S\ref{sec:quietrelax}).
 
+\paragraph{Measured result at $v_q^D/\vth = 1.0$, and a discrepancy.} The run
+completed the full sweep. Extracted from the stats series:
+\[
+  \max(\epsilon_E)/\epsilon_{\rm th} = 190.4 \ \text{at}\ \wpt = 3689, \qquad
+  \Delta KE_e/\epsilon_{\rm th} = 996 \ \text{at the crossing},\ \ 1002 \ \text{at}\ \wpt = 2\times10^4 .
+\]
+The qualitative claim reproduces: the transfer peaks at $\wpt \approx 3700$, well
+\emph{before} the crossing at $\wpt = 10^4$, and is strongly suppressed relative to a
+resonant drive at the same amplitude --- the resonant $\tfrac18 A_0^2(\wpt)^2$ law
+would reach ${\sim}6\times10^6\,\epsilon_{\rm th}$ by $\wpt = 5000$ against our
+${\sim}10^3$. (The paper's own linear line for this figure is Eq.~(LZ), not the
+resonant law, so that comparison is a sanity check rather than a reproduction.)
+
+\textbf{The absolute heating does not reproduce.} The paper states of this case ---
+explicitly the large-amplitude one, ``because the initial $v_q/\vth$ is chosen so
+large'' --- that ``the kinetic energy of the electrons is not even changed by a factor
+of 2''. We measure a factor ${\sim}10^3$. The two inputs that would explain this away
+both match the source: the amplitude ($v_q^D/\vth = 1$, the upper panel of the paper's
+Landau--Zener figure) and the sweep ($\omega(t) = 0.8\omega_p + 0.1\omega_p t/5000$,
+stated verbatim in the paper's appendix). This is unresolved and is the most important
+open item; see \S\ref{sec:status}.
+
 \paragraph{Why the low-amplitude case needs three GPUs.} At $\Npc = 2.7\times10^5$ the
 run holds $5.3\times10^8$ particles ($\approx 31$\,GB), which is tight on a single
 40\,GB A100 and comfortable at $10.5$\,GB per GPU across three. Combined with the
@@ -1159,25 +1181,46 @@ directions, predicting 8~minutes for a run that took 41, and 97~seconds of stepp
 one that exceeded 40~minutes.
 
 \section{Status and remaining work}
+\label{sec:status}
 
 \paragraph{Complete.} Both resonance cases of Fig.~2, the quiet-start implementation
 and its validation (including MPI decomposition independence), the numerical-heating
-gate at Landau--Zener duration, and the full performance characterisation.
-
-\paragraph{In progress.} Landau--Zener at $v_q^D/\vth = 1.0$ has completed the full
-sweep to $\wpt = 2\times10^4$ (2:39:32 on one A100, 500 field and 500 particle dumps);
-its analysis is pending. The $0.1$ case is written and gated on that analysis.
-
-Note that the $1.0$ case took 2:39:32 against an estimate of ${\sim}2$\,h --- it would
-not have fitted a 2\,h queue. The estimate predated the post-saturation slowdown of
+gate at Landau--Zener duration, the full performance characterisation, and the
+Landau--Zener run at $v_q^D/\vth = 1.0$ (2:39:32 on one A100, full sweep to
+$\wpt = 2\times10^4$). It took 2:39:32 against an estimate of ${\sim}2$\,h --- it would
+not have fitted a 2\,h queue. That estimate predated the post-saturation slowdown of
 \S\ref{sec:slowdown}, which applies to the swept family too.
+
+All six production runs have been reduced to \code{.npz} by
+\code{pgens/dpdm/paper/extract\_paper.py} (58 minutes on one \code{development} node;
+1.9\,GB of \code{.bp} to 22\,MB). That extraction independently reproduces the
+resonance numbers quoted in \S\ref{sec:resonance} --- fast: peak
+$\epsilon_E/\epsilon_{\rm th} = 43.55$ at $\wpt = 553$, $\Delta KE_e = 69.63$; slow:
+$2.13$ at $\wpt = 3694$, $2.43$.
+
+\paragraph{Blocked on interpretation.} The Landau--Zener case at $v_q^D/\vth = 1.0$
+disagrees with the paper's stated electron heating by ${\sim}500\times$
+(\S\ref{sec:lz}). The $0.1$ case is written but should stay gated until this is
+understood: running it would cost ${\sim}81$ GPU-hours to produce a second number
+against the same unresolved normalisation.
 
 \paragraph{Open.}
 \begin{itemize}[nosep]
-  \item \textbf{No comparison against the published figures.} Every number here is
-        internally consistent and matches the paper's \emph{text}, but the figure PDFs
-        in the source package have not been digitised. The peak $\epsilon_E/\epsilon_{\rm
-        th}$ and its timing are the sharpest available discriminators.
+  \item \textbf{The Landau--Zener heating discrepancy (\S\ref{sec:lz}), now the
+        blocking item.} Our $v_q^D/\vth = 1.0$ run heats the electrons by a factor
+        ${\sim}10^3$ where the paper reports less than $2$. Amplitude and sweep rate
+        both match the source. The next step is to digitise the published
+        Landau--Zener figure: it is the only way to tell whether the disagreement is in
+        the normalisation of the quoted statement or in the physics the drive produces
+        at $v_q \approx \vth$. Worth checking specifically whether $A_0$ should be the
+        field amplitude or the quiver velocity $v_q = eE/(m\omega)$, which differ by
+        $1/\omega = 1.25$ at $\omega = 0.8\omega_p$ --- too small to explain
+        ${\sim}500\times$ on its own, but it is the kind of definitional slip that
+        compounds.
+  \item \textbf{No comparison against the published figures} more generally. Every
+        other number here matches the paper's \emph{text}, but no figure PDF in the
+        source package has been digitised. Peak $\epsilon_E/\epsilon_{\rm th}$ and its
+        timing are the sharpest available discriminators.
   \item \textbf{Long-term stability} ($\wpt \to 8\times10^4$), the paper's strongest
         claim, is untested. At $\Npc = 2\times10^5$ it is roughly eight times the slow
         resonance case and would require multi-GPU execution with chaining.
