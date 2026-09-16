@@ -92,6 +92,21 @@ namespace user {
     the sort of silent bias a quiet start exists to avoid. Measure the realized
     variance and divide it out, so the loaded temperature is exact.
   */
+  /*
+    splitmix64 -> uniform in (0,1). Deterministic and keyed on the GLOBAL cell
+    index, so the loading is identical however MPI splits the domain -- the same
+    property the lattice loader had, kept here.
+  */
+  Inline auto hash_u01(std::uint64_t z) -> real_t {
+    z += 0x9E3779B97F4A7C15ull;
+    z  = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z  = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    z  =  z ^ (z >> 31);
+    // (z>>11 + 1/2)/2^53 stays strictly inside (0,1) so probit is finite
+    return (static_cast<real_t>(z >> 11) + HALF) /
+           static_cast<real_t>(9007199254740992.0);   // 2^53
+  }
+
   struct QuietNorm_kernel {
     const npart_t ppc;
 
@@ -151,40 +166,73 @@ namespace user {
     const std::size_t      P0, P2;
     const real_t           sig1, sig2;
     const bool             one_v;
+    const bool             shear;
 
     QuietInit_kernel(Particles<D, M::CoordType>& sp1,
                      Particles<D, M::CoordType>& sp2,
                      const array_t<real_t*>& xi_min, npart_t ppc, npart_t ncell,
                      std::size_t P0, std::size_t P2,
-                     real_t sig1, real_t sig2, bool one_v)
+                     real_t sig1, real_t sig2, bool one_v, bool shear)
       : i1_1 { sp1.i1 }, i1_2 { sp2.i1 }
       , dx1_1 { sp1.dx1 }, dx1_2 { sp2.dx1 }
       , ux1_1 { sp1.ux1 }, ux2_1 { sp1.ux2 }, ux3_1 { sp1.ux3 }, w_1 { sp1.weight }
       , ux1_2 { sp2.ux1 }, ux2_2 { sp2.ux2 }, ux3_2 { sp2.ux3 }, w_2 { sp2.weight }
       , tag_1 { sp1.tag }, tag_2 { sp2.tag }
       , xi_min { xi_min }, ppc { ppc }, ncell { ncell }
-      , P0 { P0 }, P2 { P2 }, sig1 { sig1 }, sig2 { sig2 }, one_v { one_v } {}
+      , P0 { P0 }, P2 { P2 }, sig1 { sig1 }, sig2 { sig2 }, one_v { one_v }
+      , shear { shear } {}
 
     Inline void operator()(npart_t p) const {
-      const npart_t c = p / ncell;   // velocity class
-      const npart_t i = p % ncell;   // cell
+      real_t  phi, q1, q2;
+      npart_t i;
 
-      const std::size_t np = static_cast<std::size_t>(ppc);
-      const std::size_t cc = static_cast<std::size_t>(c);
+      if (shear) {
+        /*
+          POSITIONS: an exact lattice. Cell i holds ppc particles at sub-cell
+          offsets (s+1/2)/ppc, so density is uniform to round-off and
+          eps_noise(t=0) = 0 -- the paper's stated initial condition.
 
-      // sub-cell offset: a function of the velocity class alone, so the class
-      // is a perfect dx-spaced lattice across the whole box
-      const std::size_t off = (cc * P0) % np;
-      const real_t      phi = (static_cast<real_t>(off) + HALF) /
-                              static_cast<real_t>(ppc);
+          VELOCITIES: pseudo-random per particle. The paper constrains this only
+          implicitly ("all particles equally spaced, with ions and electrons
+          colocated" describes POSITIONS), and it is what lets the lattice
+          decohere into physical shot noise, as their Fig. A00 shows happening
+          within a few 1/omega_p.
 
-      const real_t x_Cd = xi_min(0) + static_cast<real_t>(i) + phi;
-      const int      i1  = static_cast<int>(x_Cd);
-      const prtldx_t dx1 = static_cast<prtldx_t>(x_Cd - static_cast<real_t>(i1));
+          A rigid per-cell rotation of a stratified set does NOT work here: each
+          velocity class would still be a uniform comb, of spacing
+          (1 - R/ppc)*dx rather than dx, and a uniform comb translates rigidly
+          and never clumps. The assignment has to be irregular cell to cell.
+        */
+        i = p / ppc;
+        const npart_t s = p % ppc;
+        phi = (static_cast<real_t>(s) + HALF) / static_cast<real_t>(ppc);
+        const std::uint64_t gcell =
+          static_cast<std::uint64_t>(xi_min(0) + static_cast<real_t>(i));
+        const std::uint64_t key = gcell * 1000003ull + static_cast<std::uint64_t>(s);
+        q1 = hash_u01(key * 4ull);
+        q2 = hash_u01(key * 4ull + 1ull);
+      } else {
+        /*
+          LEGACY "quiet_lattice": velocity keyed on the CLASS, so every class is
+          a perfect dx-spaced lattice that survives streaming forever. Kept only
+          to reproduce the earlier runs. It does not decohere, seeds daughter
+          modes from round-off instead of 1/sqrt(N_pc), and therefore does NOT
+          reproduce the paper.
+        */
+        const npart_t     c  = p / ncell;
+        i = p % ncell;
+        const std::size_t np = static_cast<std::size_t>(ppc);
+        const std::size_t cc = static_cast<std::size_t>(c);
+        phi = (static_cast<real_t>((cc * P0) % np) + HALF) /
+              static_cast<real_t>(ppc);
+        const real_t inv = ONE / static_cast<real_t>(ppc);
+        q1 = (static_cast<real_t>(c) + HALF) * inv;
+        q2 = (static_cast<real_t>((cc * P2) % np) + HALF) * inv;
+      }
 
-      const real_t inv = ONE / static_cast<real_t>(ppc);
-      const real_t q1  = (static_cast<real_t>(c) + HALF) * inv;
-      const real_t q2  = (static_cast<real_t>((cc * P2) % np) + HALF) * inv;
+      const real_t   x_Cd = xi_min(0) + static_cast<real_t>(i) + phi;
+      const int      i1   = static_cast<int>(x_Cd);
+      const prtldx_t dx1  = static_cast<prtldx_t>(x_Cd - static_cast<real_t>(i1));
 
       i1_1(p) = i1;  dx1_1(p) = dx1;
       ux1_1(p) = sig1 * probit(q1);
@@ -197,10 +245,21 @@ namespace user {
       w_2(p) = ONE;  tag_2(p) = ParticleTag::alive;
 
       if (not one_v) {
-        // 3V: transverse components also keyed on the class, preserving the
-        // per-class lattice. They feel no force in a 1D electrostatic run.
-        const real_t q1y = (static_cast<real_t>((cc * P0 + 5u) % np) + HALF) * inv;
-        const real_t q1z = (static_cast<real_t>((cc * P2 + 7u) % np) + HALF) * inv;
+        // 3V transverse components; they feel no force in a 1D electrostatic
+        // run, so these affect only the T00 bookkeeping.
+        const std::size_t np  = static_cast<std::size_t>(ppc);
+        const std::size_t cc  = static_cast<std::size_t>(p / ncell);
+        const real_t      inv = ONE / static_cast<real_t>(ppc);
+        const std::uint64_t gcell =
+          static_cast<std::uint64_t>(xi_min(0) + static_cast<real_t>(p / ppc));
+        const std::uint64_t key =
+          gcell * 1000003ull + static_cast<std::uint64_t>(p % ppc);
+        const real_t q1y = shear
+          ? hash_u01(key * 4ull + 2ull)
+          : (static_cast<real_t>((cc * P0 + 5u) % np) + HALF) * inv;
+        const real_t q1z = shear
+          ? hash_u01(key * 4ull + 3ull)
+          : (static_cast<real_t>((cc * P2 + 7u) % np) + HALF) * inv;
         ux2_1(p) = sig1 * probit(q1y);
         ux3_1(p) = sig1 * probit(q1z);
         ux2_2(p) = sig2 * probit(q1z);
@@ -278,8 +337,9 @@ namespace user {
       raise::ErrorIf(drive != "resonance" and drive != "landau_zener",
                      "setup.drive must be either `resonance` or `landau_zener`",
                      HERE);
-      raise::ErrorIf(loading != "random" and loading != "quiet",
-                     "setup.loading must be either `random` or `quiet`",
+      raise::ErrorIf(loading != "random" and loading != "quiet" and
+                       loading != "quiet_lattice",
+                     "setup.loading must be `random`, `quiet`, or `quiet_lattice`",
                      HERE);
       raise::ErrorIf(sweep_phase != "integrated" and sweep_phase != "naive",
                      "setup.sweep_phase must be either `integrated` or `naive`",
@@ -438,9 +498,22 @@ namespace user {
       // to JuttnerSinge; for theta << 1 (here 1e-3 and 5.4e-7) that is a
       // Gaussian of width sqrt(theta). We load that Gaussian directly, which is
       // also what SHARP does -- non-relativistic, and 1V when one_v is set.
-      real_t sumsq { ZERO };
-      Kokkos::parallel_reduce("QuietNorm", ppc, QuietNorm_kernel(ppc), sumsq);
-      const auto vnorm = math::sqrt(sumsq / static_cast<real_t>(ppc));
+      const bool shear = (loading == "quiet");
+
+      // The stratified midpoint set {probit((j+1/2)/ppc)} has variance BELOW
+      // unity (-1.97% at ppc=64, -0.64% at 200), so "quiet_lattice" measures the
+      // realised variance and divides it out to land on the exact temperature.
+      //
+      // "quiet" must NOT do this. Its velocities are sampled, so the realised
+      // variance carries a physical 1/sqrt(N) fluctuation -- the same sampling
+      // whose density counterpart is the shot noise we are restoring. Dividing
+      // it out would re-quiet the very channel this loader exists to open.
+      real_t vnorm { ONE };
+      if (not shear) {
+        real_t sumsq { ZERO };
+        Kokkos::parallel_reduce("QuietNorm", ppc, QuietNorm_kernel(ppc), sumsq);
+        vnorm = math::sqrt(sumsq / static_cast<real_t>(ppc));
+      }
 
       const auto sig1 = math::sqrt(temperatures[0] / m1) / vnorm;
       const auto sig2 = math::sqrt(temperatures[1] / m2) / vnorm;
@@ -449,7 +522,7 @@ namespace user {
         "QuietInit",
         npart,
         QuietInit_kernel<S, M>(domain.species[0], domain.species[1], xi_min, ppc,
-                               ncell, P0, P2, sig1, sig2, one_v));
+                               ncell, P0, P2, sig1, sig2, one_v, shear));
       for (auto sp : { 0u, 1u }) {
         domain.species[sp].set_npart(domain.species[sp].npart() + npart);
         domain.species[sp].set_counter(domain.species[sp].counter() + npart);
