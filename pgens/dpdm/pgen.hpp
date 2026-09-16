@@ -241,6 +241,7 @@ namespace user {
     // drive parameters
     const std::string drive, loading;
     const bool        one_v;
+    const std::string sweep_phase;
     const real_t      A0, omega, omega0, domega_dt;
     // plasma parameters
     const prmvec_t    densities, temperatures;
@@ -254,6 +255,10 @@ namespace user {
       // (1/2 kT per species rather than 3/2 kT) and removes the 3V-vs-1V
       // correction from every downstream comparison.
       , one_v { p.template get<bool>("setup.one_v", true) }
+      // See drive_phase() below. "integrated" is correct and is the default;
+      // "naive" exists to test the literal reading of the paper's notation.
+      , sweep_phase { p.template get<std::string>("setup.sweep_phase",
+                                                 "integrated") }
       , A0 { p.template get<real_t>("setup.A0", ZERO) }
       , omega { p.template get<real_t>("setup.omega", ONE) }
       , omega0 { p.template get<real_t>("setup.omega0", ZERO) }
@@ -276,6 +281,9 @@ namespace user {
       raise::ErrorIf(loading != "random" and loading != "quiet",
                      "setup.loading must be either `random` or `quiet`",
                      HERE);
+      raise::ErrorIf(sweep_phase != "integrated" and sweep_phase != "naive",
+                     "setup.sweep_phase must be either `integrated` or `naive`",
+                     HERE);
       raise::ErrorIf(densities.size() != 1,
                      "setup.densities must have a single entry (per species pair)",
                      HERE);
@@ -285,11 +293,36 @@ namespace user {
     }
 
     /*
-      The swept phase is integrated analytically; sampling omega(t) per step
-      and multiplying by t accumulates a spurious chirp.
+      Two conventions, selected by setup.sweep_phase.
+
+      "integrated" (default, and the correct one): phi = int_0^t omega(t') dt'
+          = omega0*t + (1/2)*domega_dt*t^2.  The instantaneous frequency
+          d(phi)/dt is then omega0 + domega_dt*t, which is what "a drive whose
+          frequency evolves as omega(t)" means. With omega0 = 0.8 and
+          domega_dt = 2e-5 the crossing omega = omega_p is at omega_p t = 1e4.
+
+      "naive": phi = omega(t)*t = omega0*t + domega_dt*t^2, the literal reading
+          of the paper's "A_0 cos(omega t)" with "omega(t) = 0.8 w_p +
+          0.1 w_p t/5000".  This is a well-defined chirp but its instantaneous
+          frequency is omega0 + 2*domega_dt*t -- TWICE the nominal sweep rate --
+          so the crossing moves to omega_p t = 5000.
+
+      The paper's internal evidence is contradictory. Its stated omega_p/H ~ 7e4
+      matches "integrated": with d ln(omega_p^2)/dt = 3H and H = 2*domega_dt/(3*omega)
+      at crossing, domega_dt = 2e-5 gives omega_p/H = 7.5e4, whereas the naive
+      form's effective 4e-5 gives 3.75e4. But its prose places the resonance at
+      omega_p t = 5000, which is where "naive" crosses. (That prose is weak
+      evidence: LZ transfer peaks well before the crossing anyway -- our own
+      integrated run peaks at omega_p t = 3689 with the crossing at 1e4.)
+
+      "naive" is provided to measure how sensitive the nonlinear heating is to
+      the sweep rate, not because it is right.
     */
     auto drive_phase(simtime_t time) const -> real_t {
       if (drive == "landau_zener") {
+        if (sweep_phase == "naive") {
+          return (omega0 + domega_dt * time) * time;
+        }
         return omega0 * time + HALF * domega_dt * time * time;
       } else {
         return omega * time;
