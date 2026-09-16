@@ -109,6 +109,12 @@ CHUNK = 25
 # Phase-space frames to keep per run.  A 240x240 float32 histogram is 230 kB, so
 # 60 frames x 2 species is ~28 MB -- enough for a smooth movie, small enough to
 # download.  Every particle dump is still used for the T_e/T_i time series.
+# Stamped into every .npz. Bump it whenever the contents of a product change:
+# resume skips products that already exist, and without a version check a file
+# written by an older script survives the skip and silently ships the old schema.
+# That is how the Te/Ti/n_dof fix nearly went missing from four runs.
+SCHEMA = 2
+
 PHASE_FRAMES = int(os.environ.get("PHASE_FRAMES", "60"))
 PHASE_BINS   = 240
 
@@ -391,12 +397,25 @@ def main():
         # with no slow_phase.npz beside it, and a whole-run sentinel would have
         # skipped it on resubmit and silently shipped an incomplete set.
         def need(kind):
-            return force or not os.path.exists(
-                os.path.join(out_dir, f"{tag}_{kind}.npz"))
+            """True unless a product of the CURRENT schema is already on disk."""
+            if force:
+                return True
+            path = os.path.join(out_dir, f"{tag}_{kind}.npz")
+            if not os.path.exists(path):
+                return True
+            try:
+                with np.load(path) as z:
+                    return int(z["_schema"][0]) != SCHEMA
+            except Exception:
+                return True          # unreadable or truncated -> redo it
+
+        def save(kind, payload):
+            np.savez_compressed(os.path.join(out_dir, f"{tag}_{kind}.npz"),
+                                _schema=np.array([SCHEMA]), **payload)
 
         print(f"[{tag}] n_dof={n_dof}", end=" ", flush=True)
         if need("stats"):
-            np.savez_compressed(os.path.join(out_dir, f"{tag}_stats.npz"), **st)
+            save("stats", st)
             print(f"stats({st['t'].size})", end=" ", flush=True)
 
         if need("fields") or need("phase"):
@@ -407,8 +426,7 @@ def main():
             if need("fields"):
                 t0 = time.time()
                 fl = read_fields(data)
-                np.savez_compressed(os.path.join(out_dir, f"{tag}_fields.npz"),
-                                    **fl)
+                save("fields", fl)
                 print(f"fields({fl['t'].size} in {time.time() - t0:.0f}s)",
                       end=" ", flush=True)
                 x_max = float(fl["x"][-1])
@@ -420,8 +438,7 @@ def main():
                 t0 = time.time()
                 try:
                     ph = read_phase(data, x_max, PHASE_FRAMES)
-                    np.savez_compressed(
-                        os.path.join(out_dir, f"{tag}_phase.npz"), **ph)
+                    save("phase", ph)
                     print(f"phase({ph['t'].size} in {time.time() - t0:.0f}s)",
                           end=" ", flush=True)
                 except Exception as exc:
