@@ -21,7 +21,7 @@
 module load gcc/13.2.0
 module load cuda/12.8
 
-ROOT=$SCRATCH/dpdm/lz/lz1p0n
+ROOT=$SCRATCH/dpdm/lz_shear/lz1p0n
 EXE=/work/09218/gab97/ls6/entity/build-dpdm-cuda/src/entity.xc
 # pre-create the <name>/ dir: under MPI every rank races to mkdir it
 mkdir -p $ROOT/lz1p0n
@@ -64,7 +64,9 @@ cat > $ROOT/lz1p0n.toml <<EOF
   densities    = [2.0]
   temperatures = [1.0e-3, 1.0e-3]
   drive        = "landau_zener"
-  loading      = "quiet"
+  loading      = "quiet"             # SHEARING loader (gate 3447505). Binaries were
+                                     # rebuilt after the loader fix, so "quiet" now
+                                     # means lattice positions + sampled velocities.
   one_v        = true
   A0           = 3.16228e-2
   # THE ONLY DIFFERENCE FROM run_lz1p0.sh. "naive" uses phi = omega(t)*t, the
@@ -73,10 +75,18 @@ cat > $ROOT/lz1p0n.toml <<EOF
   # 0.8 + 2*domega_dt*t, i.e. TWICE the nominal sweep, so resonance is crossed
   # at omega_p t = 5000 instead of 1e4.
   #
-  # This is a SENSITIVITY TEST, not a correction: "integrated" is the correct
-  # convention and remains the default. The question it answers is whether a 2x
-  # change in sweep rate can move dKE_e by the ~500x that separates run lz1p0
-  # from the paper's stated "not even changed by a factor of 2".
+  # WHY: the paper's LZ figure (LZ3e-2_highNpc.pdf, LZ3e-3_highNpc.pdf) has an
+  # x-axis 0..1e4, and its magenta linear-theory curve completes its rise and
+  # goes flat by wp t ~ 5300. In Landau-Zener, linear theory transfers at the
+  # CROSSING -- so the paper's crossing is at wp t ~ 5000, not 1e4. That is
+  # where "naive" crosses; "integrated" crosses at 1e4, the right-hand edge of
+  # their plot, with nothing happening there.
+  #
+  # "integrated" is still the physically correct convention and remains the
+  # default. This run tests whether the paper used the other one. With the
+  # loader fixed, lz1p0 heats the electrons by 962x against the paper's "not
+  # even changed by a factor of 2", so something structural differs, and the
+  # crossing position is the concrete candidate.
   sweep_phase  = "naive"
   omega0       = 0.8
   domega_dt    = 2.0e-5
