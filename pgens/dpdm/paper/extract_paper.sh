@@ -43,27 +43,13 @@
 
 set -u
 
-DPDM=$SCRATCH/dpdm
-STAGE=$DPDM/_export_stage                    # symlinks only; copies nothing
-export PAPER_DIR=$STAGE
+export DPDM_ROOT=$SCRATCH/dpdm            # every run lives under here
 export OUT_DIR=$SCRATCH/dpdm_npy
+mkdir -p $OUT_DIR
 
-# The six runs live under three different parents, and extract_paper.py wants
-# them side by side as <dir>/<tag>/<tag>/. Symlink rather than copy: the script
-# only reads, and copying would move 1.9 GB for no reason.
-mkdir -p $STAGE $OUT_DIR
-for src in paper/fast paper/slow lz/lz1p0 lz/heat \
-           qstest/undriven_q qstest/undriven_r; do
-  tag=$(basename $src)
-  if [ -d "$DPDM/$src/$tag" ]; then
-    ln -sfn $DPDM/$src $STAGE/$tag
-  else
-    echo "WARNING: $DPDM/$src/$tag missing, will be skipped"
-  fi
-done
-
-echo "staged:"; ls -l $STAGE | sed 's/^/  /'
-echo
+# No staging: extract_paper.py addresses each run by (path, name) from its RUNS
+# table. The old symlink tree keyed on basename could not represent the re-runs,
+# since paper/fast and paper_shear/fast are both named "fast".
 
 python3 extract_paper.py
 rc=$?

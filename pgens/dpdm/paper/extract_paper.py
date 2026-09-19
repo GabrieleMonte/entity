@@ -18,34 +18,22 @@ different N_pc, different physics.
     undriven_r   undriven       0           64       400         random  } pair
 
 WHERE TO RUN THIS
-    On Lonestar6, not on your laptop: it turns ~1.9 GB of .bp into ~50 MB of
-    .npz, so reducing first means downloading 50 MB instead of 1.9 GB.  nt2py is
-    already installed there (1.5.3).  Do NOT run it on a login node: opening the
-    dump series is the memory-hungry step, not reading it.  Each .bp reserves a
-    16 MB ADIOS2 buffer at open, and `fast` has 1000 field dumps against run34's
-    300 -- an nt2.Data() call on `fast` from a login node dies with "FFS out of
-    memory" before returning.  A development node has the memory for it:
+    On Lonestar6, not on your laptop: it turns GBs of .bp into tens of MB of
+    .npz, so reducing first means a small download.  nt2py is already installed
+    there (1.5.3).  Do NOT run it on a login node: opening the dump series is
+    the memory-hungry step and a login-node open of a 1000-dump run dies with
+    "FFS out of memory".  A development node has the memory:
 
-        sbatch -p development -N 1 -n 1 -t 01:00:00 -A PHY23028 \
-               --wrap "module load gcc/13.2.0; python3 extract_paper.py"
+        sbatch extract_paper.sh
 
-    Then copy paper_npy/ home.  It also runs unchanged on a laptop against a
-    downloaded tree; set paper_dir below.
+INPUT
+    DPDM_ROOT (default $SCRATCH/dpdm) holds every run; each entry of RUNS gives
+    its `path` under that root and the `name` of the simulation inside it.  Runs
+    are addressed by (path, name) rather than by directory basename because the
+    names are NOT unique -- paper/fast and paper_shear/fast are both "fast",
+    being the same case before and after the loader fix.
 
-INPUT LAYOUT -- <paper_dir>/<tag>/<tag>/{fields,particles}/*.bp
-                <paper_dir>/<tag>/<tag>/<tag>_stats.csv
-                <paper_dir>/<tag>/<tag>.toml
-    which is what you get by staging the science and leaving the checkpoints
-    behind (paper/slow is 75 GB of .ckpt beside 483 MB of science):
-
-        DEST=$SCRATCH/dpdm_export
-        for src in paper/fast paper/slow lz/lz1p0 lz/heat \
-                   qstest/undriven_q qstest/undriven_r; do
-          tag=$(basename $src); mkdir -p $DEST/$tag
-          cp -a $SCRATCH/dpdm/$src/$tag $SCRATCH/dpdm/$src/$tag.toml $DEST/$tag/
-        done
-
-OUTPUT -- paper_npy/
+OUTPUT -- $OUT_DIR (default $SCRATCH/dpdm_npy)
     <tag>_stats.npz    scalar time series          Plots A, B, C, D
     <tag>_fields.npz   real space + k space        Plots C, E
     <tag>_phase.npz    (x, ux) histograms + a T_e cross-check   Plot F
@@ -96,7 +84,8 @@ except ImportError:
 # ----------------------------------------------------------------------------
 # Both can be overridden from the environment, which is how extract_paper.sh
 # drives this on the cluster without editing the file.
-paper_dir = os.environ.get("PAPER_DIR", "PATH/TO/paper_runs")
+dpdm_root = os.environ.get("DPDM_ROOT",
+                           os.path.expandvars("$SCRATCH/dpdm"))
 out_dir   = os.environ.get("OUT_DIR",   "paper_npy")
 # FORCE=1 re-extracts runs whose .npz already exist. Without it they are skipped,
 # so a job that hit its walltime can be resubmitted and will only do what is left.
@@ -115,7 +104,7 @@ CHUNK = 25
 # resume skips products that already exist, and without a version check a file
 # written by an older script survives the skip and silently ships the old schema.
 # That is how the Te/Ti/n_dof fix nearly went missing from four runs.
-SCHEMA = 3
+SCHEMA = 4
 
 PHASE_FRAMES = int(os.environ.get("PHASE_FRAMES", "60"))
 # Field dumps kept for the (k,t) heatmaps. `slow` wrote 540 and `fast` 1000;
@@ -147,25 +136,65 @@ HEAT_RANDOM_FLOOR = 7.6e-8       # random start at the same N_pc
 # Ordered cheapest first. The particle loop dominates and costs ~1 s per dump per
 # species, so `fast` (1000 dumps) is most of the total: if a job runs out of time
 # it will have finished the other five, and resubmitting picks up only `fast`.
+# tag -> where it lives. `path` is relative to DPDM_ROOT and `name` is the
+# simulation.name inside it, which is NOT unique: paper/fast and
+# paper_shear/fast are both called "fast". That is why runs are addressed by
+# (path, name) rather than by a symlink tree keyed on basename.
+#
+# loader: "lattice" = the original permanently-ordered quiet start, which never
+# decohered and seeded daughter modes from round-off; "shear" = the fixed one,
+# at the Poisson floor by wp t ~ 1 (gate job 3447505). Results from the two are
+# NOT comparable.
 RUNS = {
-    "heat":       dict(family="undriven",     ratio=0.0,  loading="quiet"),
-    "undriven_q": dict(family="undriven",     ratio=0.0,  loading="quiet"),
-    "undriven_r": dict(family="undriven",     ratio=0.0,  loading="random"),
-    "slow":       dict(family="resonance",    ratio=1e-3, loading="quiet"),
-    "lz1p0":      dict(family="landau_zener", ratio=1.0,  loading="quiet"),
-    "fast":       dict(family="resonance",    ratio=3e-2, loading="quiet"),
+    "heat":       dict(path="lz/heat",           name="heat",   family="undriven",
+                       ratio=0.0,  loader="lattice"),
+    "undriven_q": dict(path="qstest/undriven_q", name="undriven_q", family="undriven",
+                       ratio=0.0,  loader="lattice"),
+    "undriven_r": dict(path="qstest/undriven_r", name="undriven_r", family="undriven",
+                       ratio=0.0,  loader="random"),
+    # --- original runs, lattice loader: superseded, kept for comparison ------
+    "fast":       dict(path="paper/fast",        name="fast",   family="resonance",
+                       ratio=3e-2, loader="lattice"),
+    "slow":       dict(path="paper/slow",        name="slow",   family="resonance",
+                       ratio=1e-3, loader="lattice"),
+    "lz1p0":      dict(path="lz/lz1p0",          name="lz1p0",  family="landau_zener",
+                       ratio=1.0,  loader="lattice"),
+    # --- re-runs with the fixed (shearing) loader ---------------------------
+    "fast_s":     dict(path="paper_shear/fast",  name="fast",   family="resonance",
+                       ratio=3e-2, loader="shear"),
+    "slow_s":     dict(path="paper_shear/slow",  name="slow",   family="resonance",
+                       ratio=1e-3, loader="shear"),
+    "lz1p0_s":    dict(path="lz_shear/lz1p0",    name="lz1p0",  family="landau_zener",
+                       ratio=1.0,  loader="shear"),
+    "lz1p0n":     dict(path="lz_shear/lz1p0n",   name="lz1p0n", family="landau_zener",
+                       ratio=1.0,  loader="shear"),
+    # --- loader gate (undriven, N_pc = 2700), all three loadings ------------
+    "gate_quiet":   dict(path="gate/quiet",         name="quiet",         family="undriven",
+                         ratio=0.0, loader="shear"),
+    "gate_lattice": dict(path="gate/quiet_lattice", name="quiet_lattice", family="undriven",
+                         ratio=0.0, loader="lattice"),
+    "gate_random":  dict(path="gate/random",        name="random",        family="undriven",
+                         ratio=0.0, loader="random"),
 }
 
 GROUPS = {
-    "paper_fig2":      ["fast", "slow"],          # Plot A
-    "landau_zener":    ["lz1p0"],                 # Plot B
-    "quiet_vs_random": ["undriven_q", "undriven_r"],  # Plot C -- must be plotted together
-    "relaxation":      ["heat"],                  # Plot D
+    "paper_fig2":      ["fast_s", "slow_s"],            # Plot A (fixed loader)
+    "landau_zener":    ["lz1p0_s", "lz1p0n"],           # Plot B, both sweep conventions
+    "quiet_vs_random": ["undriven_q", "undriven_r"],    # Plot C
+    "relaxation":      ["heat"],                        # Plot D
+    "loader_gate":     ["gate_quiet", "gate_lattice", "gate_random"],  # Fig. A00 check
+    "loader_effect":   ["fast", "fast_s", "lz1p0", "lz1p0_s"],  # lattice vs shear
 }
 
 
 def rundir(tag):
-    return os.path.join(paper_dir, tag, tag)
+    r = RUNS[tag]
+    return os.path.join(dpdm_root, r["path"], r["name"])
+
+
+def deckpath(tag):
+    r = RUNS[tag]
+    return os.path.join(dpdm_root, r["path"], r["name"] + ".toml")
 
 
 def open_subset(tag, kind, n_keep):
@@ -248,7 +277,9 @@ def read_stats(tag, n_dof, rest_e=1.0, rest_i=1836.0):
                swept runs this is the cleanest way to see omega(t) advance --
                it is the actual field the pusher used, not a reconstruction.
     """
-    path = os.path.join(rundir(tag), f"{tag}_stats.csv")
+    # The CSV is named after simulation.name, NOT the tag: tag "fast_s" lives in
+    # paper_shear/fast and writes fast_stats.csv.
+    path = os.path.join(rundir(tag), f"{RUNS[tag]['name']}_stats.csv")
     # deletechars=" " keeps the literal header names ("E1^2", "J.E", ...);
     # numpy's default deletechars strips ^ and . and mangles them.
     raw = np.genfromtxt(path, delimiter=",", names=True, deletechars=" ",
@@ -416,7 +447,7 @@ def _phase_from(data):
 
 def deck_value(tag, key, default=None):
     """Read a scalar out of <tag>.toml.  The decks are the record of what ran."""
-    path = os.path.join(paper_dir, tag, f"{tag}.toml")
+    path = deckpath(tag)
     for line in open(path):
         s = line.split("#")[0].strip()
         if s.startswith(key) and "=" in s and s.split("=")[0].strip() == key:
@@ -439,11 +470,15 @@ def main():
             print(f"[{tag}] not present, skipping")
             continue
 
-        # setup.one_v is honoured only by the quiet loader; the random path gets
-        # Entity's stock isotropic 3V injector regardless (pgen.hpp:199, 340).
-        quiet  = deck_value(tag, "loading", "random") == "quiet"
-        one_v  = str(deck_value(tag, "one_v", "true")).lower() != "false"
-        n_dof  = 1 if (quiet and one_v) else 3
+        # setup.one_v is honoured by BOTH quiet loaders -- the `if (not one_v)`
+        # block sits outside the shear/lattice branch -- but NOT by the random
+        # path, which calls arch::InjectUniformMaxwellians, Entity's stock
+        # isotropic 3V injector. So the test is on the "quiet" PREFIX: matching
+        # only the exact string "quiet" silently gave n_dof = 3 for
+        # quiet_lattice runs, i.e. Te wrong by a factor 3.
+        loading = str(deck_value(tag, "loading", "random"))
+        one_v   = str(deck_value(tag, "one_v", "true")).lower() != "false"
+        n_dof   = 1 if (loading.startswith("quiet") and one_v) else 3
 
         st = read_stats(tag, n_dof)          # always cheap; summary needs it
 
@@ -497,13 +532,16 @@ def main():
 
         print(flush=True)
 
-        A0   = deck_value(tag, "A0", 0.0)
+        A0    = deck_value(tag, "A0", 0.0)
+        sweep = str(deck_value(tag, "sweep_phase", "integrated"))
         npc  = deck_value(tag, "ppc0")
         w0   = deck_value(tag, "omega0", 0.0)
         dwdt = deck_value(tag, "domega_dt", 0.0)
         meta[tag] = dict(
             family         = spec["family"],
-            loading        = deck_value(tag, "loading", "random"),
+            loader         = spec["loader"],   # "shear" | "lattice" | "random"
+            loading        = loading,
+            n_dof          = n_dof,
             one_v          = deck_value(tag, "one_v", "true"),
             vq_over_vthe   = spec["ratio"],
             A0             = A0,
@@ -513,8 +551,15 @@ def main():
             runtime        = deck_value(tag, "runtime"),
             omega0         = w0,
             domega_dt      = dwdt,
-            # resonance is crossed when omega(t) = omega_p = 1
-            t_cross        = ((1.0 - w0) / dwdt) if dwdt else None,
+            sweep_phase    = sweep,
+            # Resonance is crossed when the INSTANTANEOUS frequency d(phi)/dt
+            # reaches omega_p = 1. That differs between the conventions:
+            #   integrated  phi = w0 t + dw t^2/2  ->  d(phi)/dt = w0 + dw t
+            #   naive       phi = (w0 + dw t) t    ->  d(phi)/dt = w0 + 2 dw t
+            # so naive crosses at half the time. With w0 = 0.8, dw = 2e-5 that
+            # is 1e4 vs 5000; the paper's figure puts its crossing near 5000.
+            t_cross        = ((1.0 - w0) / ((2.0 if sweep == "naive" else 1.0) * dwdt))
+                             if dwdt else None,
             # eps_driven reaches the 1V electron thermal energy at this time
             t_sat          = (0.0632 / A0) if A0 else None,
             eps_noise      = EPS_NOISE_COEFF / npc,
