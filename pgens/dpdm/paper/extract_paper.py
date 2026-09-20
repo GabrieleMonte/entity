@@ -90,6 +90,10 @@ out_dir   = os.environ.get("OUT_DIR",   "paper_npy")
 # FORCE=1 re-extracts runs whose .npz already exist. Without it they are skipped,
 # so a job that hit its walltime can be resubmitted and will only do what is left.
 force     = os.environ.get("FORCE", "") == "1"
+# Comma-separated tags to leave alone. Use it for a run that is STILL WRITING:
+# extracting one mid-flight stamps its products with the current SCHEMA, and the
+# resume would then skip them, silently shipping a truncated run.
+skip      = {t.strip() for t in os.environ.get("SKIP", "").split(",") if t.strip()}
 # ----------------------------------------------------------------------------
 
 # Reading every dump in one .values call makes dask open all the .bp files at
@@ -466,6 +470,9 @@ def main():
     meta = {}
 
     for tag, spec in RUNS.items():
+        if tag in skip:
+            print(f"[{tag}] SKIP requested (still running?), not touched")
+            continue
         if not os.path.isdir(rundir(tag)):
             print(f"[{tag}] not present, skipping")
             continue
@@ -574,7 +581,7 @@ def main():
         )
 
     # ---- one row per run, ready to tabulate or scatter ---------------------
-    tags = [t for t in RUNS if t in meta]
+    tags = [t for t in RUNS if t in meta]   # skipped/missing runs are absent
     np.savez_compressed(
         os.path.join(out_dir, "summary.npz"),
         tags             = np.array(tags),

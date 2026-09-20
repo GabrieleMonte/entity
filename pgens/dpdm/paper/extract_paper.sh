@@ -2,10 +2,14 @@
 #SBATCH -J dpdm_extract                      # Job name
 #SBATCH -o sbatch_logs/out/extract.o%j       # Name of stdout output file
 #SBATCH -e sbatch_logs/err/extract.e%j       # Name of stderr error file
-#SBATCH -p development                       # CPU only; reading .bp needs no GPU
+#SBATCH -p vm-small                          # CPU only; reading .bp needs no GPU.
+#                                            # vm-small over development: development has
+#                                            # MaxJobsPU = 1, so this queues behind any other
+#                                            # dev job, and its 2 h cap is tight once a SCHEMA
+#                                            # bump forces every product to be rebuilt.
 #SBATCH -N 1                                 # Total # of nodes
 #SBATCH -n 1                                 # Total # of tasks
-#SBATCH -t 02:00:00                          # development cap; see note below
+#SBATCH -t 04:00:00                          # headroom for a full rebuild
 #SBATCH --mail-type=all                      # Send email at begin and end of job
 #SBATCH -A PHY23028                          # Project/Allocation name
 #SBATCH --mail-user=montefalcone@utexas.edu
@@ -51,6 +55,7 @@ mkdir -p $OUT_DIR
 # table. The old symlink tree keyed on basename could not represent the re-runs,
 # since paper/fast and paper_shear/fast are both named "fast".
 
+# SKIP a run that is still writing:  SKIP=slow_s sbatch extract_paper.sh
 python3 extract_paper.py
 rc=$?
 echo "extract exit=$rc $(date -Is)"
