@@ -50,9 +50,10 @@ reference for the input deck, job scripts and queue selection, the output format
 analysis pipeline, a procedure for sizing a new run, and a consolidated list of the
 rules and traps that govern all of it. It is reference-ordered and is the only part
 needed in order to run something.
-Part~\ref{part:impl} covers the implementation: a dedicated problem generator, a
-deterministic (``quiet'') particle loader written for this work, the four build
-configurations required on TACC Lonestar6, and a measured performance characterisation
+Part~\ref{part:impl} covers the implementation: how a problem generator attaches to
+the framework, built up from a minimal working example; the generator written for this
+work; a deterministic (``quiet'') particle loader; the four build
+configurations required on TACC Lonestar6; and a measured performance characterisation
 across CPU, single-GPU and multi-GPU execution. Part~\ref{part:runs} documents every
 production run, the exact settings used, and a point-by-point comparison with the
 parameters and results stated in the paper.
@@ -659,6 +660,349 @@ in Parts~\ref{part:impl} and~\ref{part:runs}.
 \clearpage
 \part{Implementation}
 \label{part:impl}
+
+\section{Extending \textsc{Entity}: this setup from scratch}
+\label{sec:fromscratch}
+
+This section assumes no prior knowledge of \textsc{Entity} and builds the DPDM
+resonance setup from nothing. It is the orientation for the two sections that follow:
+\S\ref{sec:pgen} describes what the production generator \emph{does},
+\S\ref{sec:builds} how to compile it; this one explains what a problem generator
+\emph{is}, how the pieces attach to the framework, and what the irreducible minimum
+looks like.
+
+\paragraph{The mental model.} \textsc{Entity}'s core is a fixed engine: Maxwell
+solver, particle pusher, current deposit, filtering, I/O, MPI decomposition. None of
+it is edited to add a new physics problem. Instead a \emph{problem generator}
+(``pgen'') --- one C++ header --- is compiled into the engine, and it answers three
+questions:
+
+\begin{enumerate}[nosep]
+  \item What particles exist at $t=0$, and where?
+  \item What extra forces act on them, beyond the self-consistent fields?
+  \item What extra numbers should be written to the diagnostics?
+\end{enumerate}
+
+Everything specific to this work is an answer to one of those three. The important
+structural fact is that a binary contains \textbf{exactly one} problem generator,
+chosen at configure time, not at run time --- so ``build the resonance case'' and
+``build the Landau--Zener case'' are the same executable, while ``build the
+reconnection case'' is a different one.
+
+\subsection{Step 1: create the file}
+
+\begin{lstlisting}
+pgens/dpdm/pgen.hpp
+\end{lstlisting}
+
+That path is the entire registration procedure. CMake globs
+\code{pgens/**/pgen.hpp} at configure time --- see \code{get\_available\_pgens}
+in \code{cmake/config.cmake} --- and \code{-D pgen=dpdm} selects the directory whose
+name matches. The selected header is then attached as an \textsc{interface} library
+linked against the core targets, by \code{set\_problem\_generator} in the same
+file. Three consequences worth stating plainly, because each removes a step one
+would otherwise look for:
+
+\begin{itemize}[nosep]
+  \item there is no registry, enum or dispatch table in the core to add a name to;
+  \item there is no \code{CMakeLists.txt} inside the pgen directory;
+  \item the \emph{directory name} is the value of the \code{pgen} option --- there is
+        no separate identifier declared inside the file.
+\end{itemize}
+
+Anything else in the directory (decks, plotting scripts, job scripts) is ignored by
+the build and is there purely for the humans.
+
+\subsection{Step 2: declare the generator and what it supports}
+
+The header defines one class template in namespace \code{user}:
+
+\begin{lstlisting}
+template <SimEngine::type S, class M>
+struct PGen {
+  static constexpr auto D { M::Dim };
+  static constexpr auto engines    = traits::pgen::compatible_with<SimEngine::SRPIC>{};
+  static constexpr auto metrics    = traits::pgen::compatible_with<Metric::Minkowski>{};
+  static constexpr auto dimensions = traits::pgen::compatible_with<Dim::_1D>{};
+  ...
+};
+\end{lstlisting}
+
+\code{S} is the physics engine and \code{M} the metric; the core instantiates the
+template for whatever the deck asks for. The three \code{compatible\_with} traits are
+declarations of intent, checked at compile time: they say this generator is written
+for special-relativistic PIC on a flat Minkowski grid in one dimension. A deck asking
+for anything else is rejected rather than silently producing wrong physics. Declaring
+more than one value is allowed --- the production generator declares
+\code{Dim::\_1D, Dim::\_2D, Dim::\_3D} --- but every declared combination has to
+actually work.
+
+\subsection{Step 3: read the deck}
+
+The constructor receives the parsed input file and the global domain:
+
+\begin{lstlisting}
+PGen(const SimulationParams& p, const Metadomain<S, M>& global_domain)
+  : params { p }
+  , A0    { p.template get<real_t>("setup.A0", ZERO) }
+  , omega { p.template get<real_t>("setup.omega", ONE) }
+  , densities    { p.template get<prmvec_t>("setup.densities",    prmvec_t{TWO}) }
+  , temperatures { p.template get<prmvec_t>("setup.temperatures", prmvec_t{ZERO,ZERO}) }
+{ /* validation goes here */ }
+\end{lstlisting}
+
+This is where the \code{[setup]} block of \S\ref{sec:deck} comes from, and the
+relationship is worth being explicit about: \textbf{\code{[setup]} is a free-form
+namespace owned entirely by the problem generator.} The core never inspects it. There
+is no schema, no list of legal keys, and nothing outside this one header knows that
+\code{setup.drive} or \code{setup.loading} exist. Each option therefore has exactly
+three touch points in \code{pgen.hpp} --- a member declaration, a \code{get} call with
+its default, and the site that consumes it:
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+Key & declared & read (default) & consumed \\
+\midrule
+\code{setup.drive}       & \code{:301} & \code{:310} (\code{"resonance"})  & \code{drive\_phase()}, \code{:382} \\
+\code{setup.loading}     & \code{:301} & \code{:311} (\code{"random"})     & \code{InitPrtls()}, \code{:433} \\
+\code{setup.sweep\_phase}& \code{:303} & \code{:319} (\code{"integrated"}) & \code{drive\_phase()}, \code{:383} \\
+\code{setup.A0}          & \code{:304} & \code{:321} (\code{0})            & \code{ext\_efield()}, \code{:393} \\
+\bottomrule
+\end{tabular}
+\caption{Line numbers in \code{pgens/dpdm/pgen.hpp}. Adding an option means editing
+these three places and nothing else.}
+\end{table}
+
+\paragraph{A trap that follows directly from this design.} The second argument to
+\code{get} is a fallback, so an absent key is legal --- which means a \emph{misspelled
+key silently takes the default}. Writing \code{loadng = "quiet"} runs the random
+loader, with no error and no warning, and the run looks entirely normal. Only the
+\emph{value} of a key is ever validated, never its name. Validation is manual, in the
+constructor body:
+
+\begin{lstlisting}
+raise::ErrorIf(loading != "random" and loading != "quiet" and
+                 loading != "quiet_lattice",
+               "setup.loading must be `random`, `quiet`, or `quiet_lattice`", HERE);
+\end{lstlisting}
+
+The same mechanism is used for cross-checks the deck cannot express on its own: that
+exactly two species are defined, and that their charges are equal and opposite.
+
+\subsection{Step 4: put particles in the box}
+
+\begin{lstlisting}
+void InitPrtls(Domain<S, M>& domain) {
+  arch::InjectUniformMaxwellians<S, M>(params, domain, densities[0],
+                                       { temperatures[0], temperatures[1] }, { 1, 2 });
+}
+\end{lstlisting}
+
+One call. \code{arch::} is \textsc{Entity}'s library of ready-made ``archetypes'';
+this one fills the domain with a co-located electron--ion pair at the requested
+density and temperatures, drawing positions uniformly at random. For a great many
+problems this line is the whole of particle initialisation, and for the minimal
+resonance setup it is sufficient.
+
+It is also the exact point at which this work had to leave the beaten path. The
+injector exposes two customisation seams --- the velocity distribution
+(\code{EnrgDistClass}) and a density profile (\code{SpatialDistClass}, which sets
+\emph{how many} particles land in a cell) --- but the sub-cell \emph{position} is
+hard-coded as a random draw inside the kernel, with no seam at all. A quiet start is
+by definition a statement about positions, so it cannot be expressed through the
+archetypes and has to be a hand-written kernel. That is the subject of
+\S\ref{sec:quiet}, and it is why \code{setup.loading} exists at all.
+
+\subsection{Step 5: add the dark photon}
+
+The drive is an external electric field that acts on the Lorentz force only; it is
+never a source term in Maxwell's equations. It takes two objects. First a field
+functor --- this is the part that runs \emph{on the GPU}, once per particle:
+
+\begin{lstlisting}
+template <Dimension D>
+struct ExtFields {
+  ExtFields(real_t e1) : e1 { e1 } {}
+  Inline auto ex1(const coord_t<D>&) const -> real_t { return e1; }   // ignores x
+private:
+  const real_t e1;
+};
+\end{lstlisting}
+
+and then the hook that hands one to the engine each step:
+
+\begin{lstlisting}
+auto ExternalFields(simtime_t t, spidx_t, const Domain<S, M>&) const
+  -> std::pair<bool, ExtFields<M::Dim>> {
+  return { A0 != ZERO, ExtFields<M::Dim>{ A0 * math::cos(omega * t) } };
+}
+\end{lstlisting}
+
+The split matters for understanding what is cheap and what is not.
+\code{ExternalFields} is called \textbf{on the host}, once per species per timestep
+(\code{src/kernels/pushers/sr\_policies.h}); the functor it returns is then evaluated
+\textbf{on the device}, once per particle. Because this drive is uniform in space, all
+of the time dependence lives in the host-side scalar and the per-particle work is a
+single register read --- the cosine is evaluated a few times per step, not $10^8$
+times. The \code{bool} is a cheap switch: return \code{false} and the engine compiles
+the external-field branch out of the push entirely.
+
+\paragraph{How the engine knows the hook is there.} It is not registered, inherited or
+declared anywhere. \textsc{Entity} tests the generator against C++20 concepts in
+\code{src/global/traits/pgen.h} --- \code{HasExternalFields} asks whether a method of
+that name and shape exists --- and compiles the call in if it does, or a no-op if it
+does not. So every hook is opt-in by simply writing it, and omitting one is not an
+error. The flip side is that a method with a slightly wrong signature is not a
+compile error either: it is silently \emph{not a hook}, and the feature just does not
+happen. The run log prints which hooks were detected (\code{engines/reporter.h}),
+which is the quickest way to confirm one took effect.
+
+\subsection{Step 6: report the drive (optional)}
+
+\begin{lstlisting}
+auto CustomStat(const std::string& name, timestep_t, simtime_t t,
+                const Domain<S, M>&) const -> real_t {
+  if (name == "e_ext") { return ext_efield(t); }
+  return ZERO;
+}
+\end{lstlisting}
+
+Named entries requested under \code{[diagnostics]} are routed here and land as extra
+columns in the statistics CSV, alongside the field and particle energies. This is how
+the drive's amplitude and phase become directly comparable with the plasma response in
+the same file rather than having to be reconstructed afterwards. It is optional, and
+nothing else depends on it.
+
+\subsection{The minimal generator, in full}
+
+Steps 2--5 assembled. This is a complete, working resonance setup:
+
+\begin{lstlisting}
+namespace user {
+  using namespace ntt;
+  using prmvec_t = std::vector<real_t>;
+
+  template <Dimension D>
+  struct ExtFields {
+    ExtFields(real_t e1) : e1 { e1 } {}
+    Inline auto ex1(const coord_t<D>&) const -> real_t { return e1; }
+  private:
+    const real_t e1;
+  };
+
+  template <SimEngine::type S, class M>
+  struct PGen {
+    static constexpr auto D { M::Dim };
+    static constexpr auto engines    = traits::pgen::compatible_with<SimEngine::SRPIC>{};
+    static constexpr auto metrics    = traits::pgen::compatible_with<Metric::Minkowski>{};
+    static constexpr auto dimensions = traits::pgen::compatible_with<Dim::_1D>{};
+
+    const SimulationParams& params;
+    const real_t   A0, omega;
+    const prmvec_t densities, temperatures;
+
+    PGen(const SimulationParams& p, const Metadomain<S, M>&)
+      : params { p }
+      , A0    { p.template get<real_t>("setup.A0", ZERO) }
+      , omega { p.template get<real_t>("setup.omega", ONE) }
+      , densities    { p.template get<prmvec_t>("setup.densities",    prmvec_t{TWO}) }
+      , temperatures { p.template get<prmvec_t>("setup.temperatures", prmvec_t{ZERO,ZERO}) } {}
+
+    void InitPrtls(Domain<S, M>& domain) {
+      arch::InjectUniformMaxwellians<S, M>(params, domain, densities[0],
+                                           { temperatures[0], temperatures[1] }, { 1, 2 });
+    }
+
+    auto ExternalFields(simtime_t t, spidx_t, const Domain<S, M>&) const
+      -> std::pair<bool, ExtFields<M::Dim>> {
+      return { A0 != ZERO, ExtFields<M::Dim>{ A0 * math::cos(omega * t) } };
+    }
+  };
+}
+\end{lstlisting}
+
+Roughly forty lines, of which two are physics. Everything in the production file
+beyond this is either a loader (\S\ref{sec:quiet}) or a second drive family
+(\S\ref{sec:pgen}).
+
+\subsection{Step 7: a deck, a build, a run}
+
+The deck needs the standard \textsc{Entity} sections --- \code{[simulation]},
+\code{[grid]}, \code{[scales]}, \code{[algorithms]}, \code{[particles]},
+\code{[diagnostics]}, \code{[output]}, covered in \S\ref{sec:deck} --- plus the
+\code{[setup]} block this generator just defined:
+
+\begin{lstlisting}
+[setup]
+  densities    = [2.0]
+  temperatures = [1.0e-3, 1.0e-3]
+  A0           = 9.48683e-4
+  omega        = 1.0
+\end{lstlisting}
+
+Then configure, compile and run. \S\ref{sec:builds} is the full recipe with the three
+traps that make the configure line longer than it looks; the short form on a login
+node is:
+
+\begin{lstlisting}
+module load gcc/13.2.0
+cmake -B build-dpdm -D pgen=dpdm -D precision=double \
+      -D deposit=esirkepov -D shape_order=5 \
+      -D Kokkos_ENABLE_OPENMP=ON -D Kokkos_ENABLE_SERIAL=OFF \
+      -D Kokkos_ARCH_ZEN3=ON -D CMAKE_IGNORE_PATH=$PWD/cmake
+cmake --build build-dpdm -j
+grep -E "^Kokkos_ENABLE_(OPENMP|SERIAL|CUDA):BOOL" build-dpdm/CMakeCache.txt
+./build-dpdm/src/entity.xc -input resonance.toml
+\end{lstlisting}
+
+\code{-D pgen=dpdm} is not optional: the default is \code{"."}, and with it CMake
+configures the libraries but never adds the executable target, so the build
+``succeeds'' and produces no \code{entity.xc}. The \code{grep} is the verification
+step from \S\ref{sec:builds} --- a Serial build is indistinguishable from the outside
+and runs ${\sim}112\times$ slower.
+
+\subsection{Summary of the interface}
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+Hook & Detected by & Role here \\
+\midrule
+\emph{(constructor)}  & required           & reads \code{[setup]}, validates it \\
+\code{engines}, \code{metrics}, \code{dimensions} & required & declares what the deck may ask for \\
+\code{InitPrtls}      & \code{HasInitPrtls}      & the $t=0$ particle state \\
+\code{ExternalFields} & \code{HasExternalFields} & the dark-photon drive \\
+\code{CustomStat}     & \code{HasCustomStatOutput}     & writes \code{e\_ext} to the CSV \\
+\bottomrule
+\end{tabular}
+\caption{Everything below the first two rows is opt-in: a generator that defines none
+of them compiles and runs, it simply has no particles and no extra physics. Concepts
+are in \code{src/global/traits/pgen.h}.}
+\end{table}
+
+What the production generator adds on top of the minimum, and where each is treated:
+the deterministic loader and its two variants (\S\ref{sec:quiet}); the swept
+Landau--Zener phase (\S\ref{sec:pgen}) and the two conventions for it
+(\S\ref{sec:sweep}); the 1V option, which zeroes the two transverse velocity
+components to match \textsc{sharp}; and the \code{e\_ext} diagnostic.
+
+\paragraph{On naming options rather than numbering them.} Two of the four
+\code{[setup]} switches are, strictly, redundant. \code{drive = "resonance"} is
+identical to \code{"landau\_zener"} with $\dot\omega=0$, since
+$\phi = \omega_0 t + \tfrac12\dot\omega t^2$ collapses to $\omega_0 t$; and
+\code{sweep\_phase = "naive"} is \emph{exactly} the integrated form at twice the
+sweep rate, since $(\omega_0 + \dot\omega t)t = \omega_0 t +
+\tfrac12(2\dot\omega)t^2$. The whole drive could therefore be three numbers ---
+$A_0$, $\omega_0$, $\dot\omega$ --- with no strings and no validation branches at
+all. The names are kept because a deck reading \code{domega\_dt = 4.0e-5} records
+what was run but not \emph{why}, and for a reproduction the intent is part of the
+result; the strings also propagate into output paths and run names. It is a
+legibility choice, not a necessity, and a generator written for a single case should
+probably not make it.
+
 
 \section{Problem generator}
 \label{sec:pgen}
