@@ -55,9 +55,16 @@ deterministic (``quiet'') particle loader written for this work, the four build
 configurations required on TACC Lonestar6, and a measured performance characterisation
 across CPU, single-GPU and multi-GPU execution. Part~\ref{part:runs} documents every
 production run, the exact settings used, and a point-by-point comparison with the
-parameters and results stated in the paper. Both resonance cases of the paper's Fig.~2
-are reproduced; the Landau--Zener family is in progress. All performance and physics
-numbers quoted are measured on Lonestar6 unless explicitly labelled as an estimate.
+parameters and results stated in the paper.
+
+Both resonance cases of the paper's Fig.~2 are reproduced. The Landau--Zener case is
+not: we measure an electron heating of ${\sim}10^3$ where the paper reports a factor
+below $2$, and four candidate explanations have been tested and excluded. Since the
+resonance cases agree, the disagreement is specific to the swept drive. All
+performance and physics numbers quoted are measured on Lonestar6 unless explicitly
+labelled as an estimate; \S\ref{sec:corrections} lists the figures from earlier drafts
+that are superseded, several of which were artefacts of a particle loader that
+satisfied the paper's stated initial condition but not its subsequent behaviour.
 \end{abstract}
 
 \tableofcontents
@@ -123,6 +130,13 @@ Path (under repository root) & Contents \\
 \code{run\_paper\_slow.sh} & Production: $v_q^D/\vth = 1\times10^{-3}$, $\Npc=2\times10^5$, 1 A100. \\
 \code{run\_paper\_slow\_resume.sh} & The same run restarted from checkpoint (\S\ref{sec:restart}). \\
 \code{run\_lz1p0.sh}, \code{run\_lz0p1.sh} & Landau--Zener production at $v_q^D/\vth = 1.0$ and $0.1$. \\
+\code{run\_gate\_loader.sh} & The loader gate: three undriven runs, one per
+                             \code{loading}, against the paper's Fig.~A00
+                             (\S\ref{sec:quietval}). \\
+\code{run\_paper\_fast\_shear.sh}, \code{run\_paper\_slow\_shear.sh},
+\code{run\_lz1p0\_shear.sh} & The three production re-runs with the corrected
+                             loader. Identical decks; new output roots. \\
+\code{run\_lz1p0\_naive.sh} & Landau--Zener with \code{sweep\_phase = "naive"}. \\
 \code{run\_lz\_heating.sh} & Undriven numerical-heating gate at Landau--Zener duration. \\
 \code{validate\_quiet.sh}, \code{check\_quiet.py} & Quiet-start validation gates (\S\ref{sec:quietval}). \\
 \code{validate\_mpi.sh}    & Confirms results are independent of MPI domain count. \\
@@ -194,16 +208,30 @@ Key & Default & Meaning \\
 \midrule
 \code{drive}        & \code{"resonance"} & \code{"resonance"} (fixed $\omega$) or
                                            \code{"landau\_zener"} (swept). \\
-\code{loading}      & \code{"random"}    & \code{"quiet"} selects the deterministic
-                                           lattice. \textbf{Set this explicitly}
-                                           --- the default is the stock random
-                                           injector (\S\ref{sec:quiet}). \\
+\code{loading}      & \code{"random"}    & \code{"quiet"} is the paper's IC:
+                                           lattice positions, sampled velocities,
+                                           relaxing to the Poisson floor.
+                                           \code{"quiet\_lattice"} is the legacy
+                                           permanently-ordered loader, kept only to
+                                           reproduce superseded runs --- it does
+                                           \emph{not} reproduce the paper
+                                           (\S\ref{sec:quietrelax}).
+                                           \code{"random"} is the stock injector and
+                                           has $\epsilon_{\rm noise}(0)\neq0$.
+                                           \textbf{Set this explicitly.} \\
 \code{one\_v}       & \code{true}        & Sets $u_{x2}=u_{x3}=0$, matching
                                            \textsc{SHARP} and the paper's 1V thermal
                                            speed. Leave on for paper comparison. \\
 \code{A0}           & \code{0.0}         & Drive amplitude in code units,
                                            $A_0 = v_q^D/c = (v_q^D/\vth)\sqrt{10^{-3}}$. \\
 \code{omega}        & \code{1.0}         & Drive frequency, \code{drive="resonance"} only. \\
+\code{sweep\_phase} & \code{"integrated"} & \code{"integrated"} gives instantaneous
+                                           frequency $\omega_0+\dot\omega t$ and is
+                                           correct; \code{"naive"} reproduces the
+                                           literal reading of the paper's notation
+                                           and sweeps at twice the rate
+                                           (\S\ref{sec:sweep}). \code{landau\_zener}
+                                           only. \\
 \code{omega0}       & \code{0.0}         & Initial frequency, \code{drive="landau\_zener"} only. \\
 \code{domega\_dt}   & \code{0.0}         & Sweep rate, \code{drive="landau\_zener"} only. \\
 \code{densities}    & \code{[2.0]}       & One entry, per species \emph{pair}.
@@ -291,7 +319,10 @@ The fast resonance case in full. Every other run in this work is this file with
   densities = [2.0]
   temperatures = [1.0e-3, 1.0e-3]
   drive = "resonance"
-  loading = "quiet"            # NOT the default -- must be stated
+  loading = "quiet"            # NOT the default -- must be stated.
+                               # "quiet" = lattice positions + sampled velocities.
+                               # "quiet_lattice" is the legacy loader; it never
+                               # decoheres and does not reproduce the paper.
   one_v = true
   A0 = 9.48683e-4              # v_q^D/vth_e = 3e-2
   omega = 1.0
@@ -318,12 +349,14 @@ The fast resonance case in full. Every other run in this work is this file with
   keep = 2
 \end{lstlisting}
 
-\noindent For the swept family, replace the four drive keys:
+\noindent For the swept family, replace the drive keys:
 \begin{lstlisting}
   drive = "landau_zener"
   A0 = 3.16228e-3              # v_q^D/vth_e = 0.1
   omega0 = 0.8                 # start below resonance
   domega_dt = 2.0e-5           # 0.1 omega_p over omega_p t = 5000
+  sweep_phase = "integrated"   # crossing at omega_p t = 1e4;
+                               # "naive" doubles the rate -> crossing at 5000
 \end{lstlisting}
 
 \section{Job scripts and the run loop}
@@ -587,6 +620,8 @@ in Parts~\ref{part:impl} and~\ref{part:runs}.
 \begin{enumerate}[nosep,resume]
   \item \code{ppc0} must be a TOML float.
   \item \code{loading = "quiet"} must be stated; the default is \code{"random"}.
+        Do not use \code{"quiet\_lattice"} for new work --- it never decoheres
+        (\S\ref{sec:quietrelax}).
   \item Include \code{[diagnostics]}, disable \code{[output.spectra]}, keep
         \code{[output.stats] interval\_time} $\ge 1.0$, keep
         \code{current\_filters = 0}.
@@ -610,8 +645,15 @@ in Parts~\ref{part:impl} and~\ref{part:runs}.
   \item $N_p$ in the shot-noise formula is the total macroparticle count.
   \item \code{Rho} is mass density; charge density is \code{Charge}.
   \item $E_x(t{=}0) = 0$ proves nothing about the loading --- \textsc{Entity}
-        initialises $E$ to zero identically and both loaders co-locate the species.
+        initialises $E$ to zero identically and every loader co-locates the species.
         The discriminator is the total density $n_e + n_i$.
+  \item A perfectly ordered lattice is \emph{not} the goal. The paper's initial
+        condition is $\epsilon_{\rm noise}(0)=0$ \emph{followed by} relaxation to the
+        Poisson floor within a few $\omega_p^{-1}$. Validate against both halves: a
+        loader that stays ordered seeds daughter modes from round-off and delays
+        saturation (\S\ref{sec:quietval}).
+  \item \textsc{Entity}'s first output row is step~1, not $t=0$, so no dump shows the
+        initial condition directly.
 \end{enumerate}
 
 \clearpage
@@ -652,139 +694,180 @@ correct, as the drive-normalisation measurement in \S\ref{sec:drivenorm} confirm
 \label{sec:quiet}
 
 The paper initialises ``all particles equally spaced, with ions and electrons
-colocated throughout the computational domain,'' which ensures $\epsilon_{\rm noise}=0$
-at $t=0$. \textsc{Entity}'s stock injector places particles at \emph{random} sub-cell
-positions and has no quiet-start option, so one was written for this work.
+colocated throughout the computational domain,'' which ensures
+$\epsilon_{\rm noise}=0$ at $t=0$. \textsc{Entity}'s stock injector places every
+particle at a uniformly random position in the domain --- not even one per cell ---
+so cell occupancy is Poisson and $\epsilon_{\rm noise}(0)\neq 0$. A loader was
+therefore written for this work.
 
-\subsection{What a quiet start must actually kill}
+\subsection{What the initial condition actually requires}
+\label{sec:quietreq}
 
-There are three independent noise channels, and the phrase ``equally spaced'' only
-obviously addresses one:
+Two things, and the second is easy to miss.
+
+\begin{enumerate}[nosep]
+  \item \textbf{$\epsilon_{\rm noise}=0$ at $t=0$.} Stated explicitly in the paper.
+  \item \textbf{Prompt relaxation to the Poisson floor.} The paper's Fig.~A00 shows
+        undriven runs starting at zero and rising to the analytic level
+        $L^2/(12N_pN_x)$ within a few $\omega_p^{-1}$, then sitting flat for
+        $2\times10^4$. The text says the same from the driven side: ``it takes
+        approximately $t\omega_p \sim 3$--$4$ for the driven energy to be converted
+        into de-coherent (high-$k$) noise.''
+\end{enumerate}
+
+The second requirement is not decorative. The paper's entire $\Npc$ criterion
+($\bar t_{\rm noise}\sim 2.4$ resonant, $\le 0.02$ swept) presumes that shot noise
+is present and sets the seed from which daughter modes grow. A loader that
+satisfies only the first produces a plasma with \emph{no} seed at all.
+
+\subsection{Three noise channels}
 
 \begin{enumerate}[nosep]
   \item \textbf{Charge density.} $\rho(x,0)\neq 0$ seeds $E(x,0)\neq0$. Killed by
-        co-locating each electron with an ion. \textsc{Entity}'s \emph{random} start
+        co-locating each electron with an ion. \textsc{Entity}'s random start
         already does this, so this channel was never the problem.
-  \item \textbf{Total density.} $n_{\rm tot} = n_e + n_i$ fluctuates at
-        $\sqrt{2/N_{\rm ppc}}$ even with perfect co-location, because both species
-        fluctuate together. Since $\omega_p \propto \sqrt{n}$, this is a spread in the
-        local resonant frequency --- the channel that physically matters.
-  \item \textbf{Velocity space.} Even on a perfect lattice, randomly sampled velocities
-        produce current fluctuations that regenerate $E$ within a plasma period and
-        re-seed channel~2 dynamically.
+  \item \textbf{Total density.} $n_{\rm tot}=n_e+n_i$ fluctuates at
+        $\sqrt{2/\Npc}$ even with perfect co-location. Since
+        $\omega_p\propto\sqrt{n}$ this is a spread in the local resonant frequency
+        --- the channel that physically matters.
+  \item \textbf{Velocity space.} Randomly sampled velocities produce current
+        fluctuations that regenerate $E$ within a plasma period.
 \end{enumerate}
 
-A loader that fixes 1 and 2 but not 3 looks perfect at $t=0$ and then relaxes to the
-random-start floor within a few $\omega_p^{-1}$.
+Channel 2 must be \emph{zero at $t=0$} and must \emph{reappear at the Poisson level
+within a few $\omega_p^{-1}$}.
 
 \subsection{Construction}
+\label{sec:quietconstr}
 
-The essential requirement is that \textbf{each velocity class must itself be a uniform
-lattice over the box}. Then
-under free streaming a class merely translates, and a $\Delta x$-spaced lattice
-deposits \emph{exactly} uniform density at any translation, because the shape function
-is a partition of unity at that spacing. Indexing by velocity class rather than by
-sub-cell slot:
+Positions form an exact lattice --- cell $i$ holds $\Npc$ particles at sub-cell
+offsets $(s+\tfrac12)/\Npc$ --- and ions reuse them exactly, so both channel~1 and
+channel~2 vanish to round-off at $t=0$. Velocities are drawn pseudo-randomly,
+keyed on a \code{splitmix64} hash of the \emph{global} cell index and slot, which
+keeps the loading independent of how MPI decomposes the domain.
 
 \begin{lstlisting}
-c    = p / ncell                      // velocity class: exactly ncell particles each
-i    = p % ncell                      // cell
-phi  = ((c*P0) mod ppc + 1/2)/ppc     // sub-cell offset: a function of c ALONE
-x    = xi_min + i + phi
-u_e  = sig1 * probit((c + 1/2)/ppc)
-u_i  = sig2 * probit(((c*P2) mod ppc + 1/2)/ppc)
+i   = p / ppc                         // cell
+s   = p % ppc                         // slot within the cell
+phi = (s + 1/2)/ppc                   // exact lattice: eps_noise(0) = 0
+x   = xi_min + i + phi
+key = (global cell)*1000003 + s       // decomposition independent
+u_e = sig1 * probit(hash_u01(4*key))
+u_i = sig2 * probit(hash_u01(4*key+1))
 \end{lstlisting}
 
-Four properties, each doing a specific job:
+\paragraph{Why the velocity assignment must be irregular.} Two constructions that
+look reasonable both fail, for the same reason.
 
-\begin{itemize}[nosep]
-  \item \code{phi} depends only on \code{c}, so every velocity class is a perfect
-        $\Delta x$ lattice. \emph{This is what makes the order survive streaming.}
-  \item \code{P0}, \code{P2} coprime to \code{ppc} make the index maps bijections, so
-        each cell carries the complete stratified quantile set exactly once (zero net
-        drift, exact temperature per cell) while consecutive slots receive
-        \emph{non}-consecutive quantiles, so no cell holds a systematic $v(x)$ ramp.
-  \item Ions reuse the electron positions, so the charge density vanishes bit-for-bit
-        at $t=0$; their velocities use a second stride so the species are not
-        phase-space correlated.
-  \item Nothing references the cell index or the domain offset, so the loading is
-        independent of how MPI decomposes the domain.
-\end{itemize}
+\emph{Velocity keyed on the class.} Give the same velocity to the same slot in
+every cell. Each velocity class is then a comb of exactly one particle per cell,
+spacing $\Delta x$, all moving at one speed. A uniform comb translates rigidly and
+deposits exactly uniform density at any offset, because the shape function is a
+partition of unity at that spacing. The sum of such combs is uniform forever: the
+lattice \textbf{never decoheres}.
 
-\paragraph{Why not the obvious construction.} Tying the velocity to the sub-cell
-\emph{slot} with a per-cell rotation is the natural first design and it does not work.
-A given velocity then sits at a different offset in each cell, so the classes shear
-apart as soon as particles move: the measured result is $\delta n/n = 6.3\times10^{-3}$
-after a \emph{single} step, with a noise floor only $2\times$ below a random start.
-Getting $t=0$ clean is easy; making the order survive streaming is the requirement.
+\emph{A rigid per-cell rotation.} Shifting the assignment by $iR$ in cell $i$ does
+not help --- each class is still a uniform comb, now of spacing
+$(1-R/\Npc)\Delta x$. Still rigid, still no clumping.
 
-\paragraph{Velocity normalisation.} The stratified set
-$\{\,\mathrm{probit}((j+\tfrac12)/\Npc)\,\}$ has mean zero by symmetry but variance
-\emph{below} unity, because midpoint quantiles under-sample the Gaussian tails:
-$-1.97\%$ at $\Npc = 64$, $-0.64\%$ at $\Npc = 200$, $-0.07\%$ at $\Npc = 2000$. A
-device-side reduction measures the realised variance and divides it out, so the loaded
-temperature is exact. Without this the plasma runs systematically cold at production
-particle counts --- an invisible bias of exactly the kind a quiet start exists to
-remove. \code{probit} is Acklam's rational approximation plus one Halley step against
-\code{erfc}, accurate to ${\sim}10^{-16}$ over $q\in[10^{-8},1-10^{-8}]$.
+The assignment has to be irregular \emph{from cell to cell}, which is what the hash
+provides. A worked example with $N_x=4$, $\Npc=4$ is the quickest way to see it: with
+class-keyed velocities, class $A$ sits at $x = 0.125, 1.125, 2.125, 3.125$ --- spacing
+exactly $1$, a perfect comb. With hashed velocities it sits at
+$x = 0.375, 1.125, 2.875, 3.625$ --- spacings $0.75, 1.75, 0.75$, irregular, and it
+clumps as soon as it streams. Both have identical, perfectly flat density at $t=0$.
 
-\subsection{Validation}
+\paragraph{Velocity normalisation, and why it is now skipped.} An ordered stratified
+set $\{\mathrm{probit}((j+\tfrac12)/\Npc)\}$ has mean zero but variance below unity
+($-1.97\%$ at $\Npc=64$, $-0.64\%$ at $200$), so the legacy loader measures the
+realised variance and divides it out. The sampling loader must \emph{not} do this:
+its realised variance carries a physical $1/\sqrt{N}$ fluctuation, the velocity-space
+counterpart of the shot noise being restored, and normalising it away would re-quiet
+the channel the loader exists to open.
+
+\subsection{Validation: the loader gate}
 \label{sec:quietval}
+
+Three undriven runs ($A_0=0$, $\Npc = 2700$, identical decks) differing only in
+\code{setup.loading}. Analytic floor $L^2/(12N_pN_x) = 4.938\times10^{-8}$; the table
+gives $\epsilon_E$ as a fraction of it.
 
 \begin{table}[h]
 \centering\small
-\begin{tabular}{@{}lll@{}}
+\begin{tabular}{@{}lrrrrr@{}}
 \toprule
-Gate & Result & Reference \\
+\code{loading} & $\wpt=1$ & $10$ & $50$ & $200$ & $500$ \\
 \midrule
-Lattice uniformity      & $\delta n/n = 0.000\times10^{0}$ (exactly) & random: $1/\sqrt{\Npc}=0.125$ \\
-Charge neutrality       & $\max|\rho_q| = 0.000\times10^{0}$        & --- \\
-Undriven noise floor    & $1.31\times10^{-17}$                       & random: $3.03\times10^{-6}$ \\
-No coherent seeded mode & peak/median $= 10.6$, power ${\sim}10^{-38}$ & --- \\
-Drive normalisation     & $C = 0.12531$                              & theory $1/8 = 0.125$ \\
-8-domain MPI vs 1 domain& agreement to $1.5\times10^{-12}$           & reduction ordering \\
+\code{quiet} (sampling)        & 1.08 & 1.33 & 1.27 & 1.45 & 1.34 \\
+\code{quiet\_lattice} (legacy) & $5.1\times10^{-14}$ & $2.1\times10^{-12}$ &
+                                 $1.7\times10^{-11}$ & $2.1\times10^{-10}$ &
+                                 $3.4\times10^{-10}$ \\
+\code{random} (stock)          & 1.18 & 1.54 & 1.53 & 1.44 & 1.58 \\
 \bottomrule
 \end{tabular}
-\caption{Quiet-start validation gates, $\Npc = 64$. Scripts:
-\code{validate\_quiet.sh}, \code{check\_quiet.py}, \code{validate\_mpi.sh}.}
+\caption{Loader gate, job 3447505. \code{quiet} is at the Poisson floor by
+$\wpt=1$ and flat --- Fig.~A00. The legacy loader is 10--15 orders below it and
+still climbing at $\wpt=500$. \code{random} is the control: it lands on the same
+floor, confirming the formula and the $N_p$ convention independently of any
+quiet-start logic. Script: \code{run\_gate\_loader.sh}.}
 \end{table}
 
-Two traps worth recording. \textsc{Entity}'s \code{Rho} field is \emph{mass} density
-($1 + 1836 = 1837$); the charge density is the separate \code{Charge} field. And
-$E_x(t{=}0)=0$ proves nothing, because \textsc{Entity} initialises $E$ to zero
-identically and \emph{both} loadings co-locate the pair --- the discriminator is the
-\emph{total} density $n_e+n_i$.
+Two traps. \textsc{Entity}'s first output row is \textbf{step 1}, not $t=0$, so no
+dump shows the initial condition directly; $t=0$ uniformity is exact by construction,
+and \code{quiet\_lattice} measuring $\delta n/n = 0.000$ with
+$\max|\rho_q| = 6\times10^{-17}$ at step~1 confirms the deposition is exact for that
+position set. And $\epsilon_E(0)\approx 0$ for \emph{all three} loadings, including
+\code{random}, because \textsc{Entity} initialises $E$ to zero identically --- the
+discriminator is the total density, never the field.
 
-\subsection{What the quiet start does \emph{not} buy}
+\subsection{Consequences of the legacy loader}
 \label{sec:quietrelax}
 
-An undriven run at $\Npc = 2700$ over the full Landau--Zener duration
-($\wpt = 2\times10^4$, $10^6$ steps) shows the ordered state \emph{relaxing}:
+The legacy loader was used for the first round of production runs, and their
+saturation times and peak energies are not reproductions. Measured $k\neq0$ field
+power relative to the $k=0$ driven mode at $\wpt\approx 40$:
 
 \begin{center}\small
-\begin{tabular}{@{}ll@{}}
+\begin{tabular}{@{}lrr@{}}
 \toprule
-$\epsilon_E$ at $t=0$ & $6.7\times10^{-23}$ \\
-$\epsilon_E$ plateau (reached by $\wpt\approx5000$) & $4.8\times10^{-8}$ \\
-random-start floor at the same $\Npc$ & $7.6\times10^{-8}$ \\
+Run & $P_{k\neq0}/P_{k=0}$ & $\wpt$ at which the ratio reaches $1\%$ \\
+\midrule
+\code{fast}, legacy    & $2.7\times10^{-31}$ & 962 \\
+\code{fast}, sampling  & $1.0\times10^{-2}$  & 0 \\
+\code{lz1p0}, legacy   & $1.7\times10^{-29}$ & 1120 \\
+\code{lz1p0}, sampling & $1.1\times10^{-3}$  & 0 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The lattice starts at round-off and relaxes to ${\sim}62\%$ of the thermal shot-noise
-floor. This is the paper's own statement (``it takes approximately $t\omega_p\sim3$--$4$
-for the driven energy to be converted into de-coherent high-$k$ noise'') seen from the
-undriven side. \textbf{Consequence: a quiet start does not permit a reduction in
-$\Npc$.} It buys a clean $t=0$ and nothing more; particle counts must still be sized
-from the paper's shot-noise criterion.
+$2.7\times10^{-31}$ is double-precision epsilon \emph{squared}: the daughter modes
+were growing out of round-off. At $\gamma = 0.061\,\omega_p$, climbing from $10^{-31}$
+to order unity takes ${\sim}1100\,\omega_p^{-1}$ of extra runway, during which the
+drive keeps pumping.
 
-The same run bounds numerical heating over $10^6$ steps with ordered loading:
-\[
-  \Delta (k_BT_e)/k_BT_e = -0.0162\%, \qquad
-  \Delta (k_BT_i)/k_BT_i = +0.0084\% .
-\]
-An ordered lattice does not drift. This was the gate for the Landau--Zener runs, where
-a slow $T_e$ creep would shift $\omega_p$ and masquerade as physics.
+\textbf{The effect is large where saturation time sets the amplitude, and small
+otherwise.} In the resonant cases the $k=0$ wave grows as $t^2$ until daughters halt
+it, so a delay translates directly into a larger peak. In the swept case the energy
+available is set by how long $\omega$ lingers near $\omega_p$, not by the onset of
+turbulence, so the same delay changes little:
+
+\begin{center}\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Run & peak $\epsilon_E/\epsilon_{\rm th}$ & $\wpt$ at peak & $kT_e$(end)$/kT_e(0)$ \\
+\midrule
+\code{fast}  legacy $\rightarrow$ sampling & $43.55 \rightarrow 9.14$ & $553 \rightarrow 238$ & $70.7 \rightarrow 75.5$ \\
+\code{slow}  legacy $\rightarrow$ sampling & $2.13 \rightarrow 0.53$  & $3694 \rightarrow 1598$ & $3.43 \rightarrow 2.53$ \\
+\code{lz1p0} legacy $\rightarrow$ sampling & $190.4 \rightarrow 237.6$ & $3689 \rightarrow 4269$ & $1003 \rightarrow 962$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{A quiet start still does not permit a reduction in $\Npc$.} With the
+sampling loader $\Npc$ sets the seed amplitude directly, which is what the paper's
+sizing assumes; under the legacy loader round-off set it and $\Npc$ was doing nothing
+for the physics. Either way, particle counts must be sized from the shot-noise
+criterion (\S\ref{sec:sizing}).
 
 \section{Building on Lonestar6}
 \label{sec:builds}
@@ -1039,22 +1122,42 @@ linear-theory line must be compared against the sum.
 \section{The two resonance cases (paper Fig.~2)}
 \label{sec:resonance}
 
-Both run to $\wpt = 10^4$ with quiet loading, 1V, on a single A100.
+Both run to $\wpt = 10^4$, 1V, with the sampling loader of \S\ref{sec:quietconstr}.
+The legacy-loader values are shown alongside because they appeared in earlier drafts
+and are \emph{not} reproductions (\S\ref{sec:quietrelax}).
 
 \begin{table}[h]
 \centering\small
-\begin{tabular}{@{}lrrrrr@{}}
+\begin{tabular}{@{}llrrrr@{}}
 \toprule
-Case & $\Npc$ & $A_0$ & $C$ & peak $\epsilon_E/\epsilon_{\rm th}$ & final $\Delta KE_e/\epsilon_{\rm th}$ \\
+Case & loader & $\Npc$ & $A_0$ & peak $\epsilon_E/\epsilon_{\rm th}$ & $kT_e$(end)$/kT_e(0)$ \\
 \midrule
-fast, $v_q^D/\vth = 3\times10^{-2}$ & $2\times10^2$ & $9.48683\times10^{-4}$ & 0.1264 & 43.6 (at $\wpt=553$)  & \textbf{69.6} \\
-slow, $v_q^D/\vth = 1\times10^{-3}$ & $2\times10^5$ & $3.16228\times10^{-5}$ & 0.1237 & 2.1 (at $\wpt=3694$) & \textbf{2.4} \\
+fast, $v_q^D/\vth = 3\times10^{-2}$ & legacy   & $2\times10^2$ & $9.48683\times10^{-4}$ & 43.55 (at 553)  & 70.7 \\
+                                    & sampling & $2\times10^2$ & $9.48683\times10^{-4}$ & \textbf{9.14} (at \textbf{238}) & \textbf{75.5} \\
+slow, $v_q^D/\vth = 1\times10^{-3}$ & legacy   & $2\times10^5$ & $3.16228\times10^{-5}$ & 2.13 (at 3694) & 3.43 \\
+                                    & sampling & $2\times10^5$ & $3.16228\times10^{-5}$ & \textbf{0.53} (at \textbf{1598}) & \textbf{2.53} \\
 \bottomrule
 \end{tabular}
-\caption{Production resonance runs. $C$ is the measured coefficient of
-$\epsilon_E + \Delta KE_e = C A_0^2 (\wpt)^2$; linear theory gives $1/8 = 0.125$.
-$\epsilon_{\rm th} = 5\times10^{-4}$ is the 1V electron thermal energy density.}
+\caption{Production resonance runs, legacy versus sampling loader.
+$\epsilon_{\rm th} = 5\times10^{-4}$ is the 1V electron thermal energy density.
+Runs \code{fast\_s} and \code{slow\_s}; the legacy rows are \code{fast}, \code{slow}.}
 \end{table}
+
+\paragraph{Both cases now agree with the paper.} For the fast-growth regime the paper
+says the electron temperature grows to $O(10^2)$ of its initial value: we measure
+$75.5$. For the slow-growth regime it says the transfer slows ``\emph{before} the
+energy density stored in the Langmuir wave becomes comparable to the initial thermal
+energy'' and that ``the total energy transfer is about the electron thermal energy'':
+we measure a field peak of $0.53\,\epsilon_{\rm th}$, which \textbf{never crosses the
+thermal line at any sample}, and a peak total transfer
+$(\epsilon_E + \Delta KE_e)$ of $1.59\,\epsilon_{\rm th}$.
+
+\paragraph{The regime distinction.} The paper separates slow and fast growth at
+$v_q^D/\vth \sim (m_e/m_p)^{1/2}/2 \approx 0.0117$. The discriminator is the lasting
+electron heating --- $75.5$ against $2.53$, a factor ${\sim}30$ --- not the peak field
+energy. With the sampling loader the two cases also separate cleanly on whether the
+field energy reaches the thermal line at all: the fast case exceeds it by $9\times$,
+the slow case never reaches it.
 
 \paragraph{Initial temperature.} $k_BT_e(0) = 4.9963\times10^{-4}$ against the 1V
 target $5.0\times10^{-4}$. The $-0.075\%$ residual is \emph{not} loading error but the
@@ -1062,174 +1165,234 @@ relativistic definition $T^{00} = \sum w\,m\,\gamma$, whose next term is
 $-\tfrac38\langle u^4\rangle = -0.075\%$. The ions, 1836 times heavier and far more
 non-relativistic, land at $4.999998\times10^{-4}$, which confirms the interpretation.
 
-\paragraph{The regime distinction.} The paper separates slow and fast growth at
-$v_q^D/\vth \sim (m_e/m_p)^{1/2}/2 \approx 0.0117$. Both of our cases overshoot the
-thermal energy in the \emph{field} energy (43.6 versus 2.1), but the lasting electron
-heating differs by a factor ${\sim}29$: $O(10^2)$ for the fast case, versus a slow case
-whose electrons are barely changed --- which is the paper's own phrasing for the
-Landau--Zener result (``the kinetic energy of the electrons is not even changed by a
-factor of 2''). \textbf{The discriminator is the final electron heating, not the peak
-field energy.}
-
-\paragraph{Saturation is delayed relative to random-start runs.} With the noise floor
-eleven orders of magnitude lower at $t=0$, daughter waves grow from a far smaller seed,
-so saturation occurs later. The fast case peaks at $\wpt = 553$ rather than the
-${\sim}110$ ($t_{\rm sat} + 1/\omega_{pi}$) seen in earlier random-start scans. This is
-expected behaviour of a correct quiet start, and it means random-start timings are not
-a valid comparison.
-
-\paragraph{Cost.} The slow case required ${\sim}51$ GPU-hours in total: 48\,h to reach
-88\% completion, then a 14.5\,h checkpoint restart --- a direct consequence of the
-post-saturation slowdown of \S\ref{sec:slowdown}.
+\paragraph{Cost.} On the legacy loader the slow case took ${\sim}51$ GPU-hours on one
+A100 (48\,h to 88\%, then a 14.5\,h restart). The sampling re-run used three A100s on
+one node and took \textbf{43\,h} against an estimate of ${\sim}25$\,h from the measured
+$2.07\times$ scaling: saturation arrives earlier with a physical seed, so more of the
+run sits in the post-saturation regime where the per-step cost roughly doubles
+(\S\ref{sec:slowdown}). Estimates built on the laminar rate are optimistic by about a
+factor two even after that effect is known about.
 
 \section{Landau--Zener runs}
 \label{sec:lz}
 
 The Landau--Zener family is the physically realistic case: in cosmology it is
-$\omega_p(t)$ that drifts through the dark-photon mass, and the duration of the real
-transition is ${\sim}10^{10}$ plasma periods, far beyond any simulation. The paper
-instead sweeps $m_{A'}(t)$ at a numerically tractable rate corresponding to
+$\omega_p(t)$ that drifts through the dark-photon mass. The paper instead sweeps
+$m_{A'}(t)$ at a numerically tractable rate, quoting
 $\omega_p/H \approx 7\times10^4$.
 
-\begin{table}[h]
-\centering\small
-\begin{tabular}{@{}lrrll@{}}
-\toprule
-Run & $v_q^D/\vth$ & $\Npc$ & Resources & Status \\
-\midrule
-Heating gate (undriven) & --- & $2.7\times10^3$ & 1 A100, 2\,h & complete: $T_e$ drift $-0.016\%$ \\
-LZ high amplitude & 1.0 & $2.7\times10^3$ & 1 A100, 2:39:32 & complete, $\wpt = 2\times10^4$ \\
-LZ low amplitude  & 0.1 & $2.7\times10^5$ & 3 A100, ${\sim}81$\,h chained & written, gated \\
-\bottomrule
-\end{tabular}
-\end{table}
+\subsection{The sweep convention}
+\label{sec:sweep}
 
-\paragraph{Particle counts.} The Landau--Zener noise criterion differs fundamentally
-from the resonant one. Before resonance the drive is a \emph{bounded} forced
-oscillation of amplitude $A_0/(1-\omega^2/\omega_p^2) = 2.78A_0$ at
-$\omega = 0.8\omega_p$, not a growing one, so there is no time at which the signal
-outgrows the noise. The paper requires
-$\bar t_{\rm noise} = L/(A_0\sqrt{3N_pN_x/2}) \le 0.02$ --- driven energy fifty times
-the shot noise --- which gives $\Npc = 2.7\times10^3$ and $2.7\times10^5$ for the two
-amplitudes. Note that the quiet start does \emph{not} relax this requirement
-(\S\ref{sec:quietrelax}).
-
-\paragraph{Measured result at $v_q^D/\vth = 1.0$, and a discrepancy.} The run
-completed the full sweep. Extracted from the stats series:
-\[
-  \max(\epsilon_E)/\epsilon_{\rm th} = 190.4 \ \text{at}\ \wpt = 3689, \qquad
-  \Delta KE_e/\epsilon_{\rm th} = 996 \ \text{at the crossing},\ \ 1002 \ \text{at}\ \wpt = 2\times10^4 .
-\]
-The qualitative claim reproduces: the transfer peaks at $\wpt \approx 3700$, well
-\emph{before} the crossing at $\wpt = 10^4$, and is strongly suppressed relative to a
-resonant drive at the same amplitude --- the resonant $\tfrac18 A_0^2(\wpt)^2$ law
-would reach ${\sim}6\times10^6\,\epsilon_{\rm th}$ by $\wpt = 5000$ against our
-${\sim}10^3$. (The paper's own linear line for this figure is Eq.~(LZ), not the
-resonant law, so that comparison is a sanity check rather than a reproduction.)
-
-\textbf{The absolute heating does not reproduce.} The paper states of this case ---
-explicitly the large-amplitude one, ``because the initial $v_q/\vth$ is chosen so
-large'' --- that ``the kinetic energy of the electrons is not even changed by a factor
-of 2''. We measure a factor ${\sim}10^3$. The two inputs that would explain this away
-both match the source: the amplitude ($v_q^D/\vth = 1$, the upper panel of the paper's
-Landau--Zener figure) and the sweep ($\omega(t) = 0.8\omega_p + 0.1\omega_p t/5000$,
-stated verbatim in the paper's appendix). This is unresolved and is the most important
-open item; see \S\ref{sec:status}.
-
-\paragraph{Why the low-amplitude case needs three GPUs.} At $\Npc = 2.7\times10^5$ the
-run holds $5.3\times10^8$ particles ($\approx 31$\,GB), which is tight on a single
-40\,GB A100 and comfortable at $10.5$\,GB per GPU across three. Combined with the
-post-saturation slowdown, a single GPU would need ${\sim}168$\,h; three reduce this to
-${\sim}81$\,h. Because the checkpoint domain count is locked, this must be chosen at
-first submission.
-
-\section{Superseded results}
-\label{sec:corrections}
-
-Three figures appearing in earlier drafts of these notes, and in comments still present
-in some older scripts, are wrong. They are listed so that they are recognisable if
-encountered --- not as a history.
+The paper's appendix gives the drive as $A_0\cos(\omega t)$ with
+$\omega(t) = 0.8\omega_p + 0.1\omega_p t/5000$. That admits two readings, and they
+are not equivalent:
 
 \begin{center}\small
-\begin{tabular}{@{}p{4.6cm}p{9.8cm}@{}}
+\begin{tabular}{@{}lllr@{}}
 \toprule
-Superseded claim & Correct statement \\
+\code{setup.sweep\_phase} & phase & instantaneous frequency & crossing \\
 \midrule
-``The shot-noise floor is $650\times$ below Eq.~B4.''
-& A units error. $N_p$ in $\epsilon_{\rm noise} = L^2/(12N_pN_x)$ is the \emph{total}
-  macroparticle count, which the paper states explicitly; it was read as per-cell.
-  Correctly evaluated, Eq.~B4 agrees with measurement at a flat $3.1\times$ across three
-  decades of $\Npc$, and is the right tool for sizing runs (\S\ref{sec:sizing}). \\
-\addlinespace
-``A quiet start removes the large-$\Npc$ requirement.''
-& It does not. The ordered state relaxes to the thermal shot-noise floor by
-  $\wpt \approx 5000$ (\S\ref{sec:quietrelax}); the paper uses a quiet start \emph{and}
-  still requires large $\Npc$. A quiet start buys a clean $t=0$, nothing more. \\
-\addlinespace
-``Per-step cost is stable.''
-& It roughly doubles once the plasma saturates (\S\ref{sec:slowdown}). A benchmark
-  confined to the laminar phase --- $0.4\%$ of a production run, and entirely before the
-  physics transition --- measures the wrong number. \\
+\code{integrated} (default) & $\omega_0 t + \tfrac12\dot\omega t^2$ & $\omega_0+\dot\omega t$ & $\wpt = 10^4$ \\
+\code{naive}                & $(\omega_0+\dot\omega t)\,t$          & $\omega_0+2\dot\omega t$ & $\wpt = 5000$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\noindent All three share a failure mode worth guarding against generally: each
-extrapolated a measurement taken outside the regime where it was then applied. The cost
-model in particular was calibrated at $\Npc \le 8000$ and subsequently failed in both
-directions, predicting 8~minutes for a run that took 41, and 97~seconds of stepping for
-one that exceeded 40~minutes.
+\code{integrated} is the correct realisation of ``a drive whose frequency evolves as
+$\omega(t)$'' and is the default. \code{naive} is a well-defined chirp sweeping at
+twice the nominal rate, provided so the paper's convention can be tested.
+
+The paper's own evidence is contradictory. Its stated $\omega_p/H\approx7\times10^4$
+matches \code{integrated}: with $\mathrm{d}\ln\omega_p^2/\mathrm{d}t = 3H$ and
+$H = 2\dot\omega/(3\omega)$ at crossing, $\dot\omega = 2\times10^{-5}$ gives
+$7.5\times10^4$, against $3.75\times10^4$ for the naive form. But its
+\emph{figure} points the other way: the $x$-axis runs $0$ to $10^4$ and the
+linear-theory curve completes its rise and goes flat by $\wpt\approx5300$. Linear
+Landau--Zener theory transfers at the crossing, so the paper's crossing is near
+$5000$ --- where \code{naive} crosses, and where \code{integrated} has nothing
+happening. The figure is the stronger evidence, which makes the quoted
+$\omega_p/H$ too large by a factor two.
+
+\subsection{Results, and an unresolved discrepancy}
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+Run & loader / sweep & crossing & peak $\epsilon_E/\epsilon_{\rm th}$ & $kT_e$(end)$/kT_e(0)$ \\
+\midrule
+\code{lz1p0}   & legacy / integrated   & $10^4$ & 190.4 (at 3689) & 1003 \\
+\code{lz1p0\_s}& sampling / integrated & $10^4$ & 237.6 (at 4269) & 962 \\
+\code{lz1p0n}  & sampling / naive      & $5000$ & 246.7 (at \textbf{2170}) & 826 \\
+\midrule
+paper (digitised) & --- & ${\approx}5000$ & --- & \textbf{${\approx}1.3$} \\
+\bottomrule
+\end{tabular}
+\caption{Landau--Zener at $v_q^D/\vth = 1$, $\Npc = 2.7\times10^3$, $\wpt = 2\times10^4$.
+The paper's value is read off its figure: the red PIC curve moves 17 pixels over the
+full $x$-range at ${\sim}153$ px per decade, i.e. a factor $10^{0.11} = 1.3$, which is
+its ``the kinetic energy of the electrons is not even changed by a factor of 2''.}
+\end{table}
+
+\textbf{We measure ${\sim}10^3$ where the paper reports ${\lesssim}2$, and the cause
+is not yet identified.} Four candidates have been tested and excluded:
+
+\begin{enumerate}[nosep]
+  \item \textbf{The loader} (\S\ref{sec:quietrelax}). $1003 \rightarrow 962$, $-4\%$.
+        Predicted in advance from \code{fast}, where the loader moved the peak field
+        energy $4.8\times$ but $\Delta KE_e$ only $7\%$.
+  \item \textbf{The sweep convention} (\S\ref{sec:sweep}). $962 \rightarrow 826$,
+        $-14\%$. The convention demonstrably took effect --- the peak moved from
+        $\wpt = 4269$ to $2170$, halving as a doubled sweep rate requires --- so this
+        is a real null, not a failed switch.
+  \item \textbf{Coherent versus random energy.} $T^{00}$ counts the uniform $k=0$
+        quiver motion, which is sloshing rather than heating, and at
+        $v_q^D/\vth = 1$ the forced oscillation alone is $2.78\,\vth$. Decomposing
+        into $\tfrac12\langle u\rangle^2$ and
+        $\tfrac12(\langle u^2\rangle - \langle u\rangle^2)$ gives a coherent fraction
+        never above $0.5\%$; the random ratio equals the total ratio to three digits.
+        The heating is genuinely thermal.
+  \item \textbf{The drive implementation.} \code{e\_ext} matches
+        $A_0\cos(\omega_0 t + \tfrac12\dot\omega t^2)$ to $9.5\times10^{-15}$ once the
+        \code{CustomStat} $t-\Delta t$ offset is applied, and does not match the naive
+        form at all. Amplitude, sweep rate and waveform are all as intended.
+\end{enumerate}
+
+Against this, both resonance cases now agree with the paper (\S\ref{sec:resonance}),
+so the machinery is sound and the disagreement is specific to the swept drive. One
+diagnostic: by the end of the run $u_{\rm rms}\approx1.2c$, so our electrons leave the
+non-relativistic regime the paper works in --- a symptom of the excess energy rather
+than an explanation for it.
+
+\subsection{Particle counts, and why the low-amplitude case stays gated}
+
+Before resonance the swept drive is a \emph{bounded} forced oscillation of amplitude
+$A_0/(1-\omega^2/\omega_p^2) = 2.78A_0$ at $\omega = 0.8\omega_p$, not a growing one,
+so there is no time at which the signal outgrows the noise. The paper requires
+$\bar t_{\rm noise} = L/(A_0\sqrt{3N_pN_x/2}) \le 0.02$, giving $\Npc = 2.7\times10^3$
+and $2.7\times10^5$ for the two amplitudes. Verified for the run used here:
+$\Npc = 2700$ gives $\bar t_{\rm noise} = 0.0199$.
+
+The $v_q^D/\vth = 0.1$ case is written (\code{run\_lz0p1.sh}, $\Npc = 2.7\times10^5$,
+$5.3\times10^8$ particles ${\approx}31$\,GB, three A100s, ${\sim}81$\,h chained) and
+deliberately \textbf{not} run. It would cost ${\sim}243$ GPU-hours to produce a second
+number against the same unresolved normalisation.
+
+\section{Superseded results}
+\label{sec:corrections}
+
+Figures from earlier drafts of this document, and from comments still present in some
+older scripts, that are wrong. Listed so they are recognisable if encountered --- not
+as a history.
+
+\begin{center}\small
+\begin{tabular}{@{}p{5.0cm}p{9.4cm}@{}}
+\toprule
+Superseded claim & Correct statement \\
+\midrule
+``The quiet start is validated: $\delta n/n = 0$ exactly, noise floor
+$1.31\times10^{-17}$ against $3.03\times10^{-6}$ random.''
+& Those gates measured the wrong property. The paper's initial condition requires
+  $\epsilon_{\rm noise}(0)=0$ \emph{and} relaxation to the Poisson floor within a few
+  $\omega_p^{-1}$ (its Fig.~A00). The legacy loader satisfied only the first: keying
+  velocity on the class makes every class a rigid comb, so the lattice never
+  decohered and driven runs seeded daughter modes from round-off
+  (\S\ref{sec:quietrelax}). ``Noise floor $10^{-17}$'' was the defect, reported as
+  an achievement. \\
+\addlinespace
+``The failed first design gave $\delta n/n = 6.3\times10^{-3}$ after one step.''
+& That is $1/\sqrt{\Npc}$ --- physical shot noise, and the paper's behaviour. It was
+  engineered away. \\
+\addlinespace
+``Both resonance cases overshoot the thermal energy in the field energy (43.6 versus
+2.1).''
+& An artefact of the legacy loader. With the sampling loader the fast case peaks at
+  $9.14\,\epsilon_{\rm th}$ and the slow case at $0.53$, never crossing the thermal
+  line --- which is what the paper describes (\S\ref{sec:resonance}). \\
+\addlinespace
+``The fast case should peak near $\wpt \approx 110$, as seen in earlier random-start
+scans.''
+& $110$ is the analytic estimate $t_{\rm sat} + 1/\omega_{pi}$, not a measurement,
+  and was mislabelled as observed. The random-start scan (\code{run34} \code{r3e-2})
+  peaks at $\wpt = 241$. The sampling loader gives $238$ --- agreement with its
+  control to $1\%$. \\
+\addlinespace
+``The paper's $\omega_p/H\approx7\times10^4$ shows it used the integrated sweep
+phase.''
+& Its figure places the crossing near $\wpt = 5000$, which is the naive convention;
+  the quoted $\omega_p/H$ is then too large by two (\S\ref{sec:sweep}). This argument
+  was used to cancel the naive-sweep test before it ran. \\
+\addlinespace
+``The shot-noise floor is $650\times$ below Eq.~B4.''
+& A units error: $N_p$ is the \emph{total} macroparticle count, not per cell.
+  Correctly evaluated, Eq.~B4 agrees with measurement at a flat $3.1\times$ and is
+  the right tool for sizing (\S\ref{sec:sizing}). \\
+\addlinespace
+``Per-step cost is stable.''
+& It roughly doubles at saturation (\S\ref{sec:slowdown}). A benchmark confined to
+  the laminar phase measures the wrong number; the \code{slow} re-run took 43\,h
+  against a $25$\,h estimate for the same reason. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Two recurring failure modes are worth naming. The first is extrapolating a
+measurement outside the regime where it was taken: the cost model, calibrated at
+$\Npc \le 8000$, predicted 8 minutes for a run that took 41 and 97 seconds for one
+that exceeded 40. The second is \textbf{validating against a property that is easy to
+measure rather than the one that matters} --- the quiet-start gates checked that the
+lattice was perfect, when the requirement was that it stop being perfect promptly.
+Both survive a long time because the wrong quantity looks excellent.
 
 \section{Status and remaining work}
 \label{sec:status}
 
-\paragraph{Complete.} Both resonance cases of Fig.~2, the quiet-start implementation
-and its validation (including MPI decomposition independence), the numerical-heating
-gate at Landau--Zener duration, the full performance characterisation, and the
-Landau--Zener run at $v_q^D/\vth = 1.0$ (2:39:32 on one A100, full sweep to
-$\wpt = 2\times10^4$). It took 2:39:32 against an estimate of ${\sim}2$\,h --- it would
-not have fitted a 2\,h queue. That estimate predated the post-saturation slowdown of
-\S\ref{sec:slowdown}, which applies to the swept family too.
+\paragraph{Complete.} The quiet-start loader and its gate against the paper's
+Fig.~A00; both resonance cases of Fig.~2 with the corrected loader, \emph{both now
+agreeing with the paper}; the Landau--Zener case at $v_q^D/\vth = 1$ under both sweep
+conventions; MPI decomposition independence; the full performance
+characterisation; and the reduction of every completed run to \code{.npz}
+(\code{extract\_paper.py}, ${\sim}4$--21 min on one \code{vm-small} node, 50\,MB).
 
-All six production runs have been reduced to \code{.npz} by
-\code{pgens/dpdm/paper/extract\_paper.py} (58 minutes on one \code{development} node;
-1.9\,GB of \code{.bp} to 22\,MB). That extraction independently reproduces the
-resonance numbers quoted in \S\ref{sec:resonance} --- fast: peak
-$\epsilon_E/\epsilon_{\rm th} = 43.55$ at $\wpt = 553$, $\Delta KE_e = 69.63$; slow:
-$2.13$ at $\wpt = 3694$, $2.43$.
+\begin{center}\small
+\begin{tabular}{@{}llrl@{}}
+\toprule
+Run & tag & wall & outcome \\
+\midrule
+loader gate            & \code{gate\_*}   & 20\,min  & at the Poisson floor by $\wpt=1$ \\
+resonant fast          & \code{fast\_s}   & 31\,min  & $kT_e \times 75.5$, paper says $O(10^2)$ \\
+resonant slow          & \code{slow\_s}   & 43\,h    & peak $0.53\,\epsilon_{\rm th}$, never crosses thermal \\
+LZ, integrated sweep   & \code{lz1p0\_s}  & 2:46     & $kT_e \times 962$ \\
+LZ, naive sweep        & \code{lz1p0n}    & 3:03     & $kT_e \times 826$ \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-\paragraph{Blocked on interpretation.} The Landau--Zener case at $v_q^D/\vth = 1.0$
-disagrees with the paper's stated electron heating by ${\sim}500\times$
-(\S\ref{sec:lz}). The $0.1$ case is written but should stay gated until this is
-understood: running it would cost ${\sim}81$ GPU-hours to produce a second number
-against the same unresolved normalisation.
+\paragraph{Blocking.} The Landau--Zener heating discrepancy: ${\sim}10^3$ against the
+paper's ${\approx}1.3$ (\S\ref{sec:lz}). Four candidates tested and excluded ---
+loader, sweep convention, coherent/random decomposition, drive implementation. Since
+both resonance cases now reproduce, the fault is specific to the swept drive rather
+than to the code generally. The $v_q^D/\vth = 0.1$ case stays gated: ${\sim}243$
+GPU-hours for a second number against the same unresolved normalisation.
 
 \paragraph{Open.}
 \begin{itemize}[nosep]
-  \item \textbf{The Landau--Zener heating discrepancy (\S\ref{sec:lz}), now the
-        blocking item.} Our $v_q^D/\vth = 1.0$ run heats the electrons by a factor
-        ${\sim}10^3$ where the paper reports less than $2$. Amplitude and sweep rate
-        both match the source. The next step is to digitise the published
-        Landau--Zener figure: it is the only way to tell whether the disagreement is in
-        the normalisation of the quoted statement or in the physics the drive produces
-        at $v_q \approx \vth$. Worth checking specifically whether $A_0$ should be the
-        field amplitude or the quiver velocity $v_q = eE/(m\omega)$, which differ by
-        $1/\omega = 1.25$ at $\omega = 0.8\omega_p$ --- too small to explain
-        ${\sim}500\times$ on its own, but it is the kind of definitional slip that
-        compounds.
-  \item \textbf{No comparison against the published figures} more generally. Every
-        other number here matches the paper's \emph{text}, but no figure PDF in the
-        source package has been digitised. Peak $\epsilon_E/\epsilon_{\rm th}$ and its
-        timing are the sharpest available discriminators.
+  \item \textbf{The \code{heat} gate predates the loader fix.} The numerical-heating
+        bound over $10^6$ steps ($\Delta T_e = -0.016\%$) was measured with the legacy
+        loader, whose lattice cannot heat because it cannot decohere. It needs
+        re-running (${\sim}2$\,h) before the Landau--Zener results rest on it.
+  \item \textbf{Only the Landau--Zener figure has been digitised.} The resonance
+        comparison still rests on the paper's text. The published Fig.~2 would give
+        peak $\epsilon_E/\epsilon_{\rm th}$ and its timing directly, which are the
+        sharpest discriminators available.
   \item \textbf{Long-term stability} ($\wpt \to 8\times10^4$), the paper's strongest
-        claim, is untested. At $\Npc = 2\times10^5$ it is roughly eight times the slow
-        resonance case and would require multi-GPU execution with chaining.
+        claim, is untested; at $\Npc = 2\times10^5$ it is roughly eight times the slow
+        case, which already took 43\,h on three A100s.
   \item \textbf{2D cross-check} not run; 1+1D sufficiency is assumed on the paper's
         word.
   \item \textbf{Collisions.} \textsc{Entity}, like \textsc{SHARP}, is collisionless.
-        The paper treats the final ion-acoustic damping analytically via $\tau_{ei}$.
-        This matches the paper's regime, but ``persists indefinitely'' should be read
-        as ``persists on collisionless timescales''.
+        ``Persists indefinitely'' should be read as ``on collisionless timescales''.
 \end{itemize}
 
 \end{document}
