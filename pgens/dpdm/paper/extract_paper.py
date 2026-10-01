@@ -110,7 +110,10 @@ CHUNK = 25
 # That is how the Te/Ti/n_dof fix nearly went missing from four runs.
 SCHEMA = 4
 
-PHASE_FRAMES = int(os.environ.get("PHASE_FRAMES", "60"))
+PHASE_FRAMES  = int(os.environ.get("PHASE_FRAMES", "60"))
+# Frames for the energy decomposition. No histograms, so it is cheaper per frame
+# than _phase and can afford finer time resolution.
+ENERGY_FRAMES = int(os.environ.get("ENERGY_FRAMES", "120"))
 # Field dumps kept for the (k,t) heatmaps. `slow` wrote 540 and `fast` 1000;
 # 250 is already finer than a plot can show, and the cost is per dump.
 FIELD_FRAMES = int(os.environ.get("FIELD_FRAMES", "250"))
@@ -166,6 +169,12 @@ RUNS = {
     # --- re-runs with the fixed (shearing) loader ---------------------------
     "fast_s":     dict(path="paper_shear/fast",  name="fast",   family="resonance",
                        ratio=3e-2, loader="shear"),
+    # Like-for-like HHS Fig. 2 fast reproduction: their ACTUAL A0 = 1e-3 (from
+    # the figure filename + reference-line fit, not the paper text) on Nx=2000
+    # (dx=0.02, needed for Entity's post-burst absorption to converge).
+    # ratio = A0/vth_e = 1e-3/0.0316228.
+    "fast_hhs":   dict(path="knobs/fast_hhs",    name="fast",   family="resonance",
+                       ratio=3.16228e-2, loader="shear"),
     "slow_s":     dict(path="paper_shear/slow",  name="slow",   family="resonance",
                        ratio=1e-3, loader="shear"),
     "lz1p0_s":    dict(path="lz_shear/lz1p0",    name="lz1p0",  family="landau_zener",
@@ -449,6 +458,100 @@ def _phase_from(data):
                 Ti_check=np.array(mom[2]) * MI_ME)
 
 
+def read_energy(tag, n_frames):
+    """
+    Split each species' kinetic energy into COHERENT and RANDOM parts.
+
+      (1/2) n m <u^2>          total
+    = (1/2) n m <u>^2          COHERENT: the population sloshing together
+    + (1/2) n m (<u^2>-<u>^2)  RANDOM:   actual heating
+
+    The drive is a uniform k=0 field, so it pumps the coherent part directly; only
+    the random part is heating. Everything is weighted by the macroparticle weight.
+
+    Per species (e, i), in code units of n_e m_e c^2:
+      t, u_mean_*, coh_*, ran_*, tot_*, d_ran_*, d_tot_*
+    d_ran_e is the Delta E_e to compare against the paper.
+
+    BOTH a non-relativistic and a relativistic form are returned:
+
+      coh_*,     ran_*,     tot_*        (1/2) m u^2 forms
+      coh_rel_*, ran_rel_*, tot_rel_*    m (gamma-1) forms, gamma = sqrt(1+u^2)
+
+    tot_rel_* equals T00_s - rest_s in _stats.npz by construction. The two agree
+    while u_rms << 1 (slow_s ends near 0.05c, fast_s near 0.28c, a 2% difference)
+    and diverge badly when they do not: lz1p0* reach u_rms ~ 1.2c, where the
+    non-relativistic form runs ~50% high. USE THE _rel FORMS FOR lz1p0*.
+
+    Mapping onto the paper's figure legend:
+      dE_knz_e    -> "electron energy change (k != 0)"   [black solid]
+      dE_knz_i    -> "ion energy change (k != 0)"        [blue solid]
+
+    <tag>_knz.npz carries those two on the FULL stats time grid -- same `t` as
+    <tag>_stats.npz, same length, no subsampling -- and is the file to plot.
+
+    dE_knz_* is built in main() as dKE_* (exact, from the stats CSV) minus the
+    coherent k=0 change (small, from particles). The d_ran_rel_* below are the
+    same quantity computed entirely from the strided particle dumps, and carry
+    percent-level sampling noise on the LARGE term; keep them only as a
+    cross-check. d_ran_* are the non-relativistic forms and are wrong by up to
+    50% for lz1p0* -- do not plot them.
+      u_mean_e    -> "electron average speed"            [red dashed]
+      vth_knz_e   -> "electron speed (k != 0)"           [black dashed]
+      vth_knz_i   -> "ion speed (k != 0)"                [blue dashed]
+    The remaining curve, "Electric field energy change" [red solid], is eps_E in
+    _stats.npz. "Without non-linearity" [magenta] is linear theory, not measured.
+    """
+    data, tmp, _ = open_subset(tag, "particles", n_frames)
+    try:
+        p     = data.particles
+        times = np.asarray(p.times, dtype=np.float64)
+        acc   = {1: [], 2: []}
+        mass  = {1: 1.0, 2: MI_ME}
+        for i in range(times.size):
+            snap = p.isel(t=int(i))
+            for sp in (1, 2):
+                df = snap.sel(sp=sp).load(cols=["ux", "w"])
+                u  = df["ux"].to_numpy(dtype=np.float64)
+                w  = df["w"].to_numpy(dtype=np.float64)
+                ws = w.sum()
+                mu = (w * u).sum() / ws
+                m2 = (w * u * u).sum() / ws
+                # Relativistic: Entity stores u = gamma*v (spatial 4-velocity/c),
+                # so gamma = sqrt(1+u^2) and the kinetic energy density is
+                # n m <gamma-1>, which is exactly T00_s - rest_s in _stats.npz.
+                # The k=0 piece is the energy of the MEAN motion,
+                # n m (sqrt(1+<u>^2) - 1); k!=0 is the remainder.
+                gm  = (w * np.sqrt(1.0 + u * u)).sum() / ws
+                tot_r = mass[sp] * (gm - 1.0)
+                coh_r = mass[sp] * (np.sqrt(1.0 + mu * mu) - 1.0)
+                acc[sp].append((mu, 0.5 * mass[sp] * mu * mu,
+                                0.5 * mass[sp] * (m2 - mu * mu),
+                                0.5 * mass[sp] * m2,
+                                coh_r, tot_r - coh_r, tot_r))
+        res = {"t": times}
+        for sp, lab in ((1, "e"), (2, "i")):
+            a = np.array(acc[sp])
+            res[f"u_mean_{lab}"]    = a[:, 0]
+            # non-relativistic (1/2 u^2) forms
+            res[f"coh_{lab}"]       = a[:, 1]
+            res[f"ran_{lab}"]       = a[:, 2]
+            res[f"tot_{lab}"]       = a[:, 3]
+            res[f"d_ran_{lab}"]     = a[:, 2] - a[0, 2]
+            res[f"d_tot_{lab}"]     = a[:, 3] - a[0, 3]
+            # relativistic (gamma-1) forms -- USE THESE for lz1p0*
+            res[f"coh_rel_{lab}"]   = a[:, 4]
+            res[f"ran_rel_{lab}"]   = a[:, 5]
+            res[f"tot_rel_{lab}"]   = a[:, 6]
+            res[f"d_ran_rel_{lab}"] = a[:, 5] - a[0, 5]
+            res[f"d_tot_rel_{lab}"] = a[:, 6] - a[0, 6]
+            # thermal speed of the k!=0 population, for the paper's right axis
+            res[f"vth_knz_{lab}"]   = np.sqrt(2.0 * a[:, 2] / mass[sp])
+        return res
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def deck_value(tag, key, default=None):
     """Read a scalar out of <tag>.toml.  The decks are the record of what ran."""
     path = deckpath(tag)
@@ -537,6 +640,52 @@ def main():
             except Exception as exc:
                 print(f"no particles ({type(exc).__name__})", end=" ", flush=True)
 
+        if need("energy"):
+            t0 = time.time()
+            try:
+                en = read_energy(tag, ENERGY_FRAMES)
+                # THE QUANTITY TO PLOT. Take the large term exactly from the
+                # stats CSV (full population, fine cadence) and only the small
+                # coherent correction from the particle dumps, which are STRIDED
+                # -- `slow` writes 1 particle in 20000, so anything derived from
+                # them alone carries percent-level sampling error. Computing both
+                # terms from particles put that error on the big term for no
+                # reason; d_ran_rel_* disagreed with dKE_* by up to 6% as a
+                # result, when they should agree to the size of the coherent part.
+                idx = np.clip(np.searchsorted(st["t"], en["t"]),
+                              0, st["t"].size - 1)
+                for lab, key in (("e", "dKE_e"), ("i", "dKE_i")):
+                    dcoh = en[f"coh_rel_{lab}"] - en[f"coh_rel_{lab}"][0]
+                    en[f"dE_knz_{lab}_frames"] = st[key][idx] - dcoh
+                    en[f"dKE_{lab}_at_frames"] = st[key][idx]
+                save("energy", en)
+
+                # Same quantity on the FULL stats grid. dKE is untouched at
+                # full resolution; only the coherent term -- <=0.5% of it, and
+                # available solely at the particle dumps -- is interpolated
+                # between them. No smoothing is applied to the signal.
+                # IONS: no subtraction. The k=0 drive acts on ions with 1/1836
+                # the force, so their coherent drift is negligible in absolute
+                # terms (coh_i peaks at 5e-7 against dKE_i ~ 1e-5). Subtracting
+                # an interpolated coh_i introduced ~1000 spurious negatives in
+                # slow_s purely from aliasing, so dKE_i IS the k!=0 curve.
+                #
+                # ELECTRONS: the subtraction is required -- early on the k=0
+                # driven mode dominates and coh_e reaches 2e-4 -- but coh_e
+                # oscillates at 2*omega_p (period 3.14) and CANNOT be
+                # interpolated from coarsely spaced dumps. Use the value at the
+                # particle frames themselves (d_ran_rel_e in _energy.npz), at
+                # the finest cadence the particle output supports.
+                knz = {"t": st["t"],
+                       "dE_knz_i": st["dKE_i"], "dKE_i": st["dKE_i"],
+                       "dKE_e": st["dKE_e"]}
+                save("knz", knz)
+                print(f"knz({knz['t'].size})", end=" ", flush=True)
+                print(f"energy({en['t'].size} in {time.time() - t0:.0f}s)",
+                      end=" ", flush=True)
+            except Exception as exc:
+                print(f"no energy ({type(exc).__name__})", end=" ", flush=True)
+
         print(flush=True)
 
         A0    = deck_value(tag, "A0", 0.0)
@@ -610,7 +759,16 @@ def main():
         heat_plateau=HEAT_PLATEAU, heat_random_floor=HEAT_RANDOM_FLOOR)
     meta["_linear_law"] = "eps_E + dKE_e = (A0^2/8)*(omega_p t)^2  -- not eps_E alone"
     meta["_thermal_ref"] = "5e-4 is the 1V value; T00_1 - 1 = 1.5e-3 is 3V and wrong here"
-    with open(os.path.join(out_dir, "meta.json"), "w") as fh:
+    # MERGE with any existing meta.json rather than overwriting it: keys written
+    # by hand or by other tooling (e.g. _hhs_corrections, the HHS factor-2 and
+    # true-amplitude record) must survive an extraction re-run.
+    meta_path = os.path.join(out_dir, "meta.json")
+    if os.path.exists(meta_path):
+        with open(meta_path) as fh:
+            old = json.load(fh)
+        old.update(meta)
+        meta = old
+    with open(meta_path, "w") as fh:
         json.dump(meta, fh, indent=2)
 
     print(f"\nwrote {out_dir}/")
