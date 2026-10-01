@@ -1,0 +1,125 @@
+# RUN C3 -- magnetosphere WITH drive. Fixes the two reasons C2 showed nothing.
+#
+#  1. ALIASING. C2 sampled fields every 0.4 while the drive period is 2*pi/12.5
+#     = 0.503 -- only 1.26 samples per period, BELOW Nyquist. The drive folded
+#     down to an apparent 3.21 and landed on top of magnetospheric noise, so the
+#     lock-in had nothing clean to find. 0.2 gives 2.51 samples/period, the same
+#     ratio that worked in A2.
+#  2. AMPLITUDE. A0 = 1.28e-4 (v_q/v_th = 0.013) was chosen for strict linearity
+#     and is simply too weak against a chaotic magnetosphere. 1e-3 is 8x larger,
+#     v_q/v_th = 0.10: mildly nonlinear but detectable.
+#
+# Entity has NO settable RNG seed, so C3 and B3 are independent realizations and
+# plain C3 - B3 differencing will NOT work (C2 - B2 gave +6%, -41%, -9%, +2%:
+# run-to-run chaos, not signal). Use the lock-in at omega_d, as in A2.
+#
+# Sampling notes from B3 follow.
+#
+# B2 completed cleanly but its wind zone was under-resolved, not under-dense:
+# it used only 2.75e6 particles, 6% of maxnpart, and at r = 4 that is 0.17
+# MACROparticles per cell (n/n0 = 0.042 x ppc0 = 4). You cannot represent a
+# plasma with a sixth of a particle per cell, which is why B_phi peaked at the
+# stellar surface instead of outside the light cylinder the way run B (which
+# had 7.9 particles/cell there) correctly did.
+#
+# So the fix is ppc0, not more injection -- the atmosphere block below is
+# B2's unchanged, because it was stable and bounded for the full 40 time units.
+#
+#   ppc0    4 -> 20     5x the sampling; ~1e7 particles, still well under maxnpart
+#   extent  12 -> 6     1.9 R_LC. Concentrates cells where the Y-point and the
+#                       start of the current sheet live, instead of spending
+#                       them on empty far wind.
+#   res     384x192 -> 288x192   a coarser log-r grid, which with the smaller
+#                       domain keeps dt about the same and the step count flat.
+#   match/absorb ds 1.5 -> 1.2   still 2.4 emitted wavelengths for C3.
+#   output  0.4 -> 0.2  see the C3 header: 0.4 was BELOW Nyquist for the drive.
+#
+# Resolution: dr = 0.0062 at the surface, d_e there = 0.024 = 3.9 cells.
+
+[simulation]
+  name    = "nsC3_magnetosphere_drive"
+  engine  = "srpic"
+  runtime = 40.0              # 2 rotation periods
+
+[grid]
+  resolution = [288, 192]
+  extent     = [[1.0, 6.0]]   # 1.9 R_LC
+
+  [grid.metric]
+    metric = "qspherical"
+
+  [grid.boundaries]
+    fields    = [["ATMOSPHERE", "MATCH"]]
+    particles = [["ATMOSPHERE", "ABSORB"]]
+
+    [grid.boundaries.match]
+      ds = 1.2
+    [grid.boundaries.absorb]
+      ds = 1.2
+
+    [grid.boundaries.atmosphere]
+      temperature = 0.1
+      density     = 10.0
+      height      = 0.05
+      species     = [1, 2]
+      ds          = 0.5
+
+[scales]
+  larmor0    = 0.0025
+  skindepth0 = 0.08
+
+[algorithms]
+  current_filters = 4
+
+  [algorithms.timestep]
+    CFL = 0.5
+
+  [algorithms.gca]
+    e_ovr_b_max = 0.9
+    larmor_max  = 1.0
+
+[particles]
+  ppc0           = 20.0
+  use_weights    = true
+  clear_interval = 100
+
+  [[particles.species]]
+    label    = "e-"
+    mass     = 1.0
+    charge   = -1.0
+    maxnpart = 3e7
+    pusher   = "Boris,GCA"
+
+  [[particles.species]]
+    label    = "e+"
+    mass     = 1.0
+    charge   = 1.0
+    maxnpart = 3e7
+    pusher   = "Boris,GCA"
+
+[setup]
+  Bsurf          = 1.0
+  field_geometry = "dipole"
+  period         = 20.0       # Omega = 0.314, R_LC = 3.18
+  spinup         = 5.0
+  A0             = 1.0e-3    # v_q/v_th = 0.10, EIGHT times C2
+  omega_d        = 12.5      # resonance where n = n0, i.e. r ~ 2.7
+  drive_ramp     = 2.0
+
+[diagnostics]
+  interval       = 200
+  log_level      = "WARNING"
+  colored_stdout = false
+
+[output]
+  format = "BPFile"
+
+  [output.fields]
+    interval_time = 0.2       # 200 frames; matches C3 exactly for comparison
+    quantities    = ["N_1", "N_2", "E", "B", "Rho", "J"]
+
+  [output.particles]
+    enable = false
+
+  [output.spectra]
+    enable = false

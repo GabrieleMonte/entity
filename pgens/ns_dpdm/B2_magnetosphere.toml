@@ -1,0 +1,122 @@
+# RUN B2 -- rotating magnetosphere, NO dark photon. Rerun of B, made affordable.
+#
+# Run B died at t = 11.5 of 60 with
+#     "Trying to set npart to 20002096 which is larger than maxnpart 20000000"
+# and was projecting 5 h 11 min remaining at 18.5%. Both symptoms of one cause,
+# and the cause was a parameter error of mine, not bad luck:
+#
+#   height = 0.2 with ds = 2.0 made the injector MAINTAIN a thick corona all the
+#   way out to r = 3 (target n there is still 0.36 n0, over a huge spherical
+#   volume) and refill it every single step. The shipped magnetosphere.toml uses
+#   height = 0.02, where the profile is dead by r = 1.1 and ds = 2.0 is
+#   harmless. I raised height to get cells-per-scale-height and did not notice
+#   it had turned a thin surface layer into a domain-filling plasma source.
+#
+# Fixes, roughly in order of how much they save:
+#   height  0.2 -> 0.05   thin atmosphere again (still 7.7 cells/scale height)
+#   ds      2.0 -> 0.5    inject only at the surface; the wind fills the rest
+#   ppc0    10  -> 4
+#   extent  20  -> 12     still 3.8 R_LC, far less volume to fill
+#   res     512x256 -> 384x192   fewer cells AND a 1.3x larger dt
+#   runtime 60  -> 40     2 rotations, enough for the Y-point and sheet
+#   maxnpart 2e7 -> 4e7   headroom rather than a cliff (~5 GB/species)
+#
+# Together ~15-20x cheaper than run B.
+
+[simulation]
+  name    = "nsB2_magnetosphere"
+  engine  = "srpic"
+  runtime = 40.0              # 2 rotation periods
+
+[grid]
+  resolution = [384, 192]
+  extent     = [[1.0, 12.0]]  # 3.8 R_LC
+
+  [grid.metric]
+    metric = "qspherical"
+
+  [grid.boundaries]
+    fields    = [["ATMOSPHERE", "MATCH"]]
+    particles = [["ATMOSPHERE", "ABSORB"]]
+
+    [grid.boundaries.match]
+      ds = 1.5                # measure fluxes INSIDE r = 10.5, this layer damps
+    [grid.boundaries.absorb]
+      ds = 1.5
+
+    [grid.boundaries.atmosphere]
+      temperature = 0.1
+      density     = 10.0
+      height      = 0.05      # THE fix: thin surface layer, not a domain-filling source
+      species     = [1, 2]
+      ds          = 0.5       # inject only near the surface
+
+[scales]
+  # skindepth0 = 0.08: d_e at the surface (n = 10 n0) is 0.025 = 4.3 cells.
+  # larmor0 = 0.0025 => sigma0 = 1024, local sigma ~ 100 at the surface.
+  # r_L0 = 0.0025 is BELOW a cell (0.0059), which is why the pushers below are
+  # hybrid Boris/GCA -- guiding-centre everywhere except where E/B > 0.9, i.e.
+  # exactly in the current sheet, where full Boris takes over.
+  larmor0    = 0.0025
+  skindepth0 = 0.08
+
+[algorithms]
+  current_filters = 4
+
+  [algorithms.timestep]
+    CFL = 0.5
+
+  [algorithms.gca]
+    e_ovr_b_max = 0.9
+    larmor_max  = 1.0
+
+[particles]
+  ppc0           = 4.0
+  use_weights    = true
+  clear_interval = 100
+
+  [[particles.species]]
+    label    = "e-"
+    mass     = 1.0
+    charge   = -1.0
+    maxnpart = 4e7
+    pusher   = "Boris,GCA"
+
+  [[particles.species]]
+    label    = "e+"
+    mass     = 1.0
+    charge   = 1.0
+    maxnpart = 4e7
+    pusher   = "Boris,GCA"
+
+[setup]
+  Bsurf          = 1.0
+  field_geometry = "dipole"
+  period         = 20.0       # Omega = 0.314, R_LC = 3.18
+  spinup         = 5.0        # ramp Omega in over 5 t_c; avoids the startup pulse
+  A0             = 0.0        # NO dark photon -- this is the control
+  omega_d        = 12.5
+
+[diagnostics]
+  interval       = 200
+  log_level      = "WARNING"
+  colored_stdout = false
+
+[output]
+  format = "BPFile"
+
+  [output.fields]
+    interval_time = 0.4       # 100 frames
+    quantities    = ["N_1", "N_2", "E", "B", "Rho", "J"]
+
+  [output.particles]
+    enable = false
+
+  [output.spectra]
+    enable = false
+
+  # NOTE: no [output.stats] block. Entity hard-disables stats output in
+  # non-Cartesian geometry (framework/parameters/output -> parameters.cpp:254,
+  # "@TODO: disabling stats for non-Cartesian"), so the CSV would get a header
+  # and never a single row. Diagnostics here come from the field snapshots.
+  # The drive is analytic anyway: e_ext(t) = A0 * cos(omega_d * t).

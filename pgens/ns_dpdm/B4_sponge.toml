@@ -1,0 +1,96 @@
+# RUN B4 -- B3 repeated with a REAL absorbing sponge at the outer boundary.
+#
+# MatchFields now returns MatchVacuum, which names bx3/ex1/ex2/ex3 (all zero in
+# the static vacuum dipole). Until now MatchFields returned InitFields, which
+# defines only bx1/bx2 -- and the kernel IGNORES undefined components, so E and
+# B_phi were never damped at the wall in ANY earlier run, at any match.ds.
+#
+# Paired with B5 (identical but with the whole system flipped) to find out
+# whether the north/south pile-up is physical or a grid artifact.
+
+[simulation]
+  name    = "nsB4_sponge"
+  engine  = "srpic"
+  runtime = 25.0              # 2 rotation periods
+
+[grid]
+  resolution = [288, 192]
+  extent     = [[1.0, 6.0]]   # 1.9 R_LC
+
+  [grid.metric]
+    metric = "qspherical"
+
+  [grid.boundaries]
+    fields    = [["ATMOSPHERE", "MATCH"]]
+    particles = [["ATMOSPHERE", "ABSORB"]]
+
+    [grid.boundaries.match]
+      ds = 1.2
+    [grid.boundaries.absorb]
+      ds = 1.2
+
+    [grid.boundaries.atmosphere]
+      temperature = 0.1
+      density     = 10.0
+      height      = 0.05
+      species     = [1, 2]
+      ds          = 0.5
+
+[scales]
+  larmor0    = 0.0025
+  skindepth0 = 0.08
+
+[algorithms]
+  current_filters = 4
+
+  [algorithms.timestep]
+    CFL = 0.5
+
+  [algorithms.gca]
+    e_ovr_b_max = 0.9
+    larmor_max  = 1.0
+
+[particles]
+  ppc0           = 20.0
+  use_weights    = true
+  clear_interval = 100
+
+  [[particles.species]]
+    label    = "e-"
+    mass     = 1.0
+    charge   = -1.0
+    maxnpart = 3e7
+    pusher   = "Boris,GCA"
+
+  [[particles.species]]
+    label    = "e+"
+    mass     = 1.0
+    charge   = 1.0
+    maxnpart = 3e7
+    pusher   = "Boris,GCA"
+
+[setup]
+  Bsurf          = 1.0
+  field_geometry = "dipole"
+  period         = 20.0       # Omega = 0.314, R_LC = 3.18
+  spinup         = 5.0
+  A0             = 0.0        # control
+  omega_d        = 12.5
+
+[diagnostics]
+  interval       = 200
+  log_level      = "WARNING"
+  colored_stdout = false
+
+[output]
+  format = "BPFile"
+
+  [output.fields]
+    interval_time = 0.2       # 200 frames; matches C3 exactly for comparison
+    quantities    = ["N_1", "N_2", "E", "B", "Rho", "J"]
+
+  [output.particles]
+    enable = false
+
+  [output.spectra]
+    enable = false

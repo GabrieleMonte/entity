@@ -1,0 +1,99 @@
+# RUN B5 -- B4 with the ENTIRE SYSTEM FLIPPED. The control experiment.
+#
+# period -> -20 (Omega -> -Omega) AND Bsurf -> -1 (mu -> -mu). Reversing both
+# pseudovectors is a rotation of the whole system by pi about the x axis: it is
+# the SAME physical configuration, viewed upside down, and it maps north <-> south.
+# Omega.B is unchanged, so the Goldreich-Julian charge density is unchanged.
+#
+# THE TEST: B3/B2/C2/C3 all piled plasma into +z, four for four. Shot-noise
+# symmetry breaking should pick a direction at random, so four-for-four is
+# suspicious.
+#   pile-up moves to -z  => physical: it tracks the configuration
+#   pile-up stays at +z  => numerical: something prefers the theta=0 axis
+
+[simulation]
+  name    = "nsB5_flipped"
+  engine  = "srpic"
+  runtime = 25.0              # 2 rotation periods
+
+[grid]
+  resolution = [288, 192]
+  extent     = [[1.0, 6.0]]   # 1.9 R_LC
+
+  [grid.metric]
+    metric = "qspherical"
+
+  [grid.boundaries]
+    fields    = [["ATMOSPHERE", "MATCH"]]
+    particles = [["ATMOSPHERE", "ABSORB"]]
+
+    [grid.boundaries.match]
+      ds = 1.2
+    [grid.boundaries.absorb]
+      ds = 1.2
+
+    [grid.boundaries.atmosphere]
+      temperature = 0.1
+      density     = 10.0
+      height      = 0.05
+      species     = [1, 2]
+      ds          = 0.5
+
+[scales]
+  larmor0    = 0.0025
+  skindepth0 = 0.08
+
+[algorithms]
+  current_filters = 4
+
+  [algorithms.timestep]
+    CFL = 0.5
+
+  [algorithms.gca]
+    e_ovr_b_max = 0.9
+    larmor_max  = 1.0
+
+[particles]
+  ppc0           = 20.0
+  use_weights    = true
+  clear_interval = 100
+
+  [[particles.species]]
+    label    = "e-"
+    mass     = 1.0
+    charge   = -1.0
+    maxnpart = 3e7
+    pusher   = "Boris,GCA"
+
+  [[particles.species]]
+    label    = "e+"
+    mass     = 1.0
+    charge   = 1.0
+    maxnpart = 3e7
+    pusher   = "Boris,GCA"
+
+[setup]
+  Bsurf          = -1.0       # FLIPPED: mu -> -mu
+  field_geometry = "dipole"
+  period         = -20.0      # FLIPPED: Omega = -0.314
+  spinup         = 5.0
+  A0             = 0.0        # control
+  omega_d        = 12.5
+
+[diagnostics]
+  interval       = 200
+  log_level      = "WARNING"
+  colored_stdout = false
+
+[output]
+  format = "BPFile"
+
+  [output.fields]
+    interval_time = 0.2       # 200 frames; matches C3 exactly for comparison
+    quantities    = ["N_1", "N_2", "E", "B", "Rho", "J"]
+
+  [output.particles]
+    enable = false
+
+  [output.spectra]
+    enable = false

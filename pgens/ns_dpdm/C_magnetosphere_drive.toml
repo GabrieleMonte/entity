@@ -1,0 +1,121 @@
+# RUN C -- rotating magnetosphere WITH the dark-photon drive.
+#
+# Purpose: both together. Identical to run B except A0 != 0, so B is the paired
+# control -- the conversion signal is O(eps) on top of a loud, radiating current
+# sheet, and differencing C against B is how you dig it out.
+#
+# omega_d = 12.5 = 1/skindepth0, so the resonance omega_p = omega_d sits where
+# n = n0, just above the surface where the corona thins out.
+#
+# (original run-B notes follow)
+# Expect:
+# plasma lifted off the surface fills a corotating closed zone; field lines that
+# do not close inside R_LC open up and carry a wind; a Y-point forms near R_LC
+# with an equatorial current sheet beyond it.
+#
+# IMPORTANT: that current sheet is TEARING-UNSTABLE and should visibly shed
+# plasmoids. That is the physics, not a failure. "Stable" here means the
+# spin-down power and total particle count plateau while the sheet keeps
+# churning -- a perfectly steady sheet would be the suspicious outcome.
+#
+# period = 20 => Omega = 0.314, R_LC = c/Omega = 3.18 Rstar. Badly compressed
+# versus a real pulsar (R_LC/Rstar ~ 1e3-1e5) but it puts the light cylinder,
+# Y-point and current sheet all inside a small, cheap box.
+
+[simulation]
+  name    = "nsC_magnetosphere_drive"
+  engine  = "srpic"
+  runtime = 60.0              # 3 rotation periods
+
+[grid]
+  resolution = [512, 256]
+  extent     = [[1.0, 20.0]]  # ~6.3 R_LC
+
+  [grid.metric]
+    metric = "qspherical"
+
+  [grid.boundaries]
+    fields    = [["ATMOSPHERE", "MATCH"]]
+    particles = [["ATMOSPHERE", "ABSORB"]]
+
+    [grid.boundaries.match]
+      ds = 3.0                # measure fluxes INSIDE r = 17, this layer damps
+    [grid.boundaries.absorb]
+      ds = 3.0
+
+    [grid.boundaries.atmosphere]
+      temperature = 0.1
+      density     = 10.0
+      height      = 0.2
+      species     = [1, 2]
+      ds          = 2.0
+
+[scales]
+  # skindepth0 = 0.08: d_e at the surface (n = 10 n0) is 0.025 = 4.3 cells.
+  # larmor0 = 0.0025 => sigma0 = 1024, local sigma ~ 100 at the surface.
+  # r_L0 = 0.0025 is BELOW a cell (0.0059), which is why the pushers below are
+  # hybrid Boris/GCA -- guiding-centre everywhere except where E/B > 0.9, i.e.
+  # exactly in the current sheet, where full Boris takes over.
+  larmor0    = 0.0025
+  skindepth0 = 0.08
+
+[algorithms]
+  current_filters = 4
+
+  [algorithms.timestep]
+    CFL = 0.5
+
+  [algorithms.gca]
+    e_ovr_b_max = 0.9
+    larmor_max  = 1.0
+
+[particles]
+  ppc0           = 10.0
+  use_weights    = true
+  clear_interval = 100
+
+  [[particles.species]]
+    label    = "e-"
+    mass     = 1.0
+    charge   = -1.0
+    maxnpart = 2e7
+    pusher   = "Boris,GCA"
+
+  [[particles.species]]
+    label    = "e+"
+    mass     = 1.0
+    charge   = 1.0
+    maxnpart = 2e7
+    pusher   = "Boris,GCA"
+
+[setup]
+  Bsurf          = 1.0
+  field_geometry = "dipole"
+  period         = 20.0       # Omega = 0.314, R_LC = 3.18
+  spinup         = 5.0        # ramp Omega in over 5 t_c; avoids the startup pulse
+  A0             = 3.125e-4  # v_q = A0/(larmor0*omega_d) = 0.01 = 0.03 v_th
+  omega_d        = 12.5
+
+[diagnostics]
+  interval       = 200
+  log_level      = "WARNING"
+  colored_stdout = false
+
+[output]
+  format = "BPFile"
+
+  [output.fields]
+    interval_time = 0.5       # 120 frames
+    quantities    = ["N_1", "N_2", "E", "B", "Rho", "J"]
+
+  [output.particles]
+    enable = false
+
+  [output.spectra]
+    enable = false
+
+  # NOTE: no [output.stats] block. Entity hard-disables stats output in
+  # non-Cartesian geometry (framework/parameters/output -> parameters.cpp:254,
+  # "@TODO: disabling stats for non-Cartesian"), so the CSV would get a header
+  # and never a single row. Diagnostics here come from the field snapshots.
+  # The drive is analytic anyway: e_ext(t) = A0 * cos(omega_d * t).

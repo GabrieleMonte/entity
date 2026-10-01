@@ -1,0 +1,112 @@
+# RUN A3 -- A2 rerun for a WATCHABLE wave, and a per-frame-visible signal.
+#
+# A2 proved the physics (lock-in: 29x S/N, ring at r = 1.63, cos-theta angular
+# structure). It is a poor animation for two independent reasons, both fixable
+# only by rerunning, since output cadence is fixed at write time:
+#
+#  1. NOT ENOUGH ROOM. Resonance at r ~ 1.5, match layer starting at 2.2, and
+#     an emitted wavelength of 2*pi/10 = 0.628 -- under ONE wavelength of clean
+#     space. Finer sampling alone would show the field oscillating in place, not
+#     propagating. extent 3 -> 6 with match ds 1.5 gives ~4.8 wavelengths
+#     between the shell and the absorber.
+#
+#  2. UNDERSAMPLED IN TIME. interval_time 0.25 against a 0.628 period is 2.5
+#     samples/period: above Nyquist (so the lock-in worked) but the sign flips
+#     almost every frame, so the gif strobes. 0.0628 gives 10 samples/period.
+#
+# And two changes to make the ring visible per frame, not just after a lock-in.
+# A2 measured coherent/noise = 1.10 for E_r at the shell -- signal exactly at
+# the noise floor. Noise falls as 1/sqrt(ppc0), so:
+#     ppc0  10 -> 40   halves the noise
+#     A0   3e-3 -> 6e-3  doubles the signal (v_q/v_th = 0.027, still linear)
+# Expected per-frame coherent/noise ~4, i.e. a ring you can actually see.
+#
+# Everything else is A2 unchanged: the atmosphere that put the resonance at a
+# measured r = 1.41, and omega_d = 10.
+
+[simulation]
+  name    = "nsA3_wave"
+  engine  = "srpic"
+  runtime = 15.0
+
+[grid]
+  resolution = [384, 192]
+  extent     = [[1.0, 6.0]]  # ~4.8 emitted wavelengths of clean space
+
+  [grid.metric]
+    metric = "qspherical"
+
+  [grid.boundaries]
+    fields    = [["ATMOSPHERE", "MATCH"]]
+    particles = [["ATMOSPHERE", "ABSORB"]]
+
+    [grid.boundaries.match]
+      ds = 1.5                # 2.4 emitted wavelengths -- absorbs, does not mirror
+    [grid.boundaries.absorb]
+      ds = 1.5
+
+    [grid.boundaries.atmosphere]
+      temperature = 0.05      # v_th = 0.224
+      density     = 9.2       # n0; puts omega_p = omega_d at r = 1.20
+      height      = 0.075     # the key change: v_esc/v_th = 5.16
+      species     = [1, 2]
+      ds          = 3.0
+
+[scales]
+  # skindepth0 = 0.1 => omega_p = 10 at n0, so the resonance condition
+  # omega_p = omega_d = 10 is exactly n = n0. larmor0 = skindepth0 => sigma0 = 1
+  # (unmagnetized, closest to the validated Minkowski runs); r_L = 0.1 = 37 cells.
+  larmor0    = 0.1
+  skindepth0 = 0.1
+
+[algorithms]
+  current_filters = 2
+
+  [algorithms.timestep]
+    CFL = 0.5
+
+[particles]
+  ppc0           = 40.0       # 4x A2: halves the shot noise that hid the ring
+  use_weights    = true
+  clear_interval = 100
+
+  [[particles.species]]
+    label    = "e-"
+    mass     = 1.0
+    charge   = -1.0
+    maxnpart = 4e7
+    pusher   = "Vay"
+
+  [[particles.species]]
+    label    = "e+"
+    mass     = 1.0
+    charge   = 1.0
+    maxnpart = 4e7
+    pusher   = "Vay"
+
+[setup]
+  Bsurf          = 1.0
+  field_geometry = "dipole"
+  period         = 1.0e6      # static star
+  spinup         = 0.0
+  A0             = 6.0e-3     # 2x A2; v_q/v_th = 0.027, still linear
+  omega_d        = 10.0       # resonance at r = 1.40
+  drive_ramp     = 2.0        # ~3 drive periods (period = 2*pi/10 = 0.63)
+
+[diagnostics]
+  interval       = 200
+  log_level      = "WARNING"
+  colored_stdout = false
+
+[output]
+  format = "BPFile"
+
+  [output.fields]
+    interval_time = 0.0628    # 10 samples per drive period; 239 frames
+    quantities    = ["N_1", "N_2", "E", "B", "Rho", "J"]
+
+  [output.particles]
+    enable = false
+
+  [output.spectra]
+    enable = false

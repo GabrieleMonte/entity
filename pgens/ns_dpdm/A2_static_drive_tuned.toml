@@ -1,0 +1,131 @@
+# RUN A2 -- non-rotating star + dark-photon drive, TUNED for a sharp resonance.
+#
+# Run A failed to localize the shell for a structural reason: its atmosphere
+# settled into an extended r^-1.6 profile, so omega_p only spanned 39 -> 11
+# across the whole box while the drive sat at omega_d = 20. The plasma was
+# near-resonant EVERYWHERE and the ring smeared out over the domain.
+#
+# Three changes, in order of importance:
+#
+#  1. STEEPEN THE ATMOSPHERE.  height 0.2 -> 0.075. The binding ratio is
+#     v_esc/v_th = sqrt(2/height), independent of temperature, so this is the
+#     only knob that stops the corona expanding: 3.16 (run A) -> 5.16 here.
+#     n(r) = 45 exp(-13.33 (1 - 1/r)) now falls by 3 decades over r = 1 -> 2.
+#
+#     The resonance sits at r = 1.2, NOT further out, and that is a cost
+#     decision as much as a physics one: n_max is what you must pay for, and
+#     moving the crossing outward makes it explode (r_res = 1.40 needs n_max =
+#     45, which at ppc0 = 20 is ~900 particles/cell at the base). Pulling it in
+#     to 1.2 needs only n_max = 9.2 AND gives a steeper sweep.
+#
+#       r      1.0   1.1   1.2    1.3   1.5    2.0
+#       n/n0   9.2   2.74  1.00   0.42  0.108  0.012
+#       omega_p 30.3 16.6  10.0   6.5   3.3    1.08   <- crosses 10 at r = 1.20
+#
+#     d ln(omega_p)/dr at the crossing is 4.7, against 0.32 in run A: 15x.
+#
+#  2. STAY LINEAR.  Run A's response saturated by t ~ 5 at ~10x the drive, and
+#     saturation flattens the resonant peak. v_q = A0/(larmor0*omega_d) = 3e-3,
+#     so v_q/v_th = 0.013 here versus 0.03 in run A.
+#
+#  3. RAMP THE DRIVE.  A0*cos(0) = A0 kicks every particle at t=0 and rings the
+#     box broadband at the local omega_p, which is exactly the noise that buries
+#     a narrow resonance. drive_ramp fades it in over ~3 drive periods.
+#
+# Resolution at the resonance (r = 1.20, dr = 0.0034): d_e = 0.1 = 29 cells,
+# lambda_D = 0.022 = 6.5 cells, emitted wavelength 2*pi/omega_d = 0.63 = 220
+# cells. At the surface lambda_D = 0.0074 = 2.6 cells, comfortable now that the
+# base is 9.2 n0 rather than 45.
+#
+# DIAGNOSTIC NOTE: plot fB3 (B_phi), not the charge density. Run A showed the
+# charge-density response is ~10-20% of the particle shot-noise level at this
+# ppc, so it is not a usable diagnostic. B_phi has an EXACTLY zero background
+# (the dipole is purely poloidal, and DriveFields pins bx3 = 0 at the surface)
+# and is a grid field, so it is far smoother than a particle moment.
+
+[simulation]
+  name    = "nsA2_tuned"
+  engine  = "srpic"
+  runtime = 20.0
+
+[grid]
+  resolution = [384, 192]
+  extent     = [[1.0, 3.0]]
+
+  [grid.metric]
+    metric = "qspherical"
+
+  [grid.boundaries]
+    fields    = [["ATMOSPHERE", "MATCH"]]
+    particles = [["ATMOSPHERE", "ABSORB"]]
+
+    [grid.boundaries.match]
+      ds = 0.8
+    [grid.boundaries.absorb]
+      ds = 0.8
+
+    [grid.boundaries.atmosphere]
+      temperature = 0.05      # v_th = 0.224
+      density     = 9.2       # n0; puts omega_p = omega_d at r = 1.20
+      height      = 0.075     # the key change: v_esc/v_th = 5.16
+      species     = [1, 2]
+      ds          = 3.0
+
+[scales]
+  # skindepth0 = 0.1 => omega_p = 10 at n0, so the resonance condition
+  # omega_p = omega_d = 10 is exactly n = n0. larmor0 = skindepth0 => sigma0 = 1
+  # (unmagnetized, closest to the validated Minkowski runs); r_L = 0.1 = 37 cells.
+  larmor0    = 0.1
+  skindepth0 = 0.1
+
+[algorithms]
+  current_filters = 2
+
+  [algorithms.timestep]
+    CFL = 0.5
+
+[particles]
+  ppc0           = 10.0       # 10 per cell per species AT the resonance (n = n0)
+  use_weights    = true
+  clear_interval = 100
+
+  [[particles.species]]
+    label    = "e-"
+    mass     = 1.0
+    charge   = -1.0
+    maxnpart = 1e7
+    pusher   = "Vay"
+
+  [[particles.species]]
+    label    = "e+"
+    mass     = 1.0
+    charge   = 1.0
+    maxnpart = 1e7
+    pusher   = "Vay"
+
+[setup]
+  Bsurf          = 1.0
+  field_geometry = "dipole"
+  period         = 1.0e6      # static star
+  spinup         = 0.0
+  A0             = 3.0e-3     # v_q/v_th = 0.013, linear regime
+  omega_d        = 10.0       # resonance at r = 1.40
+  drive_ramp     = 2.0        # ~3 drive periods (period = 2*pi/10 = 0.63)
+
+[diagnostics]
+  interval       = 200
+  log_level      = "WARNING"
+  colored_stdout = false
+
+[output]
+  format = "BPFile"
+
+  [output.fields]
+    interval_time = 0.25      # 120 frames
+    quantities    = ["N_1", "N_2", "E", "B", "Rho", "J"]
+
+  [output.particles]
+    enable = false
+
+  [output.spectra]
+    enable = false
